@@ -7,6 +7,8 @@ as "the same pattern" or "an invariant field" — that judgment call belongs
 in code that's testable and auditable on its own, not embedded in a prompt.
 """
 
+from .evidence_diversity import evidence_diversity_score
+
 DIFFABLE_FIELDS = [
     "auth_method_present",
     "session_cookie_present",
@@ -15,7 +17,20 @@ DIFFABLE_FIELDS = [
     "egress_follows_access",  # bool
 ]
 
-GRADUATION_THRESHOLD = 3  # confirmed instances needed to leave "provisional" tier
+# Graduation is a two-part gate, not a raw instance count. Raw count alone
+# is statistically weak: if a field is genuinely variable (say truly 80/20
+# split) rather than invariant, the odds of 3 random draws all landing on
+# the same value are ~51% — a coin flip that a "confirmed" template locks
+# in a field as trusted when it isn't. Requiring diversity alongside count
+# closes this at the graduation gate itself, rather than relying on the
+# auditor to catch it later after it's already been trusted.
+#
+# Both thresholds are starting points, not validated against real review
+# volume — no production Hayabusa/EVTX history exists yet to calibrate
+# against (same open gap noted throughout this design). Recalibrate once
+# real traffic is available; MIN_DIVERSITY in particular is a guess.
+GRADUATION_THRESHOLD = 3   # minimum confirmed instances
+MIN_DIVERSITY = 0.5        # minimum evidence_diversity_score, see evidence_diversity.py
 
 
 def pattern_identity_key(alert: dict) -> tuple:
@@ -45,12 +60,20 @@ def build_structural_template(
             "tier": "provisional" | "confirmed",
             "provenance": "live" | "seeded",
             "instance_count": int,
+            "diversity_score": float,
         }
 
     provenance "seeded" = bulk-imported (e.g. dataset case #1) rather than
     earned one live human confirmation at a time. Structurally identical
     once built, but worth tracking so a bad seeded assumption can be traced
     later rather than poisoning decisions invisibly.
+
+    Graduating to "confirmed" requires BOTH instance_count >=
+    GRADUATION_THRESHOLD AND diversity_score >= MIN_DIVERSITY. Count alone
+    can pass on repetition (the same host/user/hour logged three times);
+    diversity alone with too few instances is just noise. Neither is
+    sufficient by itself — see the module-level comment above these
+    constants for why count-only graduation is statistically weak.
     """
     fields = {}
     for field in DIFFABLE_FIELDS:
@@ -59,11 +82,15 @@ def build_structural_template(
             fields[field] = values.pop()
 
     count = len(confirmed_negative_instances)
+    diversity = evidence_diversity_score(confirmed_negative_instances)
+    is_confirmed = count >= GRADUATION_THRESHOLD and diversity >= MIN_DIVERSITY
+
     return {
         "fields": fields,
-        "tier": "confirmed" if count >= GRADUATION_THRESHOLD else "provisional",
+        "tier": "confirmed" if is_confirmed else "provisional",
         "provenance": provenance,
         "instance_count": count,
+        "diversity_score": diversity,
     }
 
 

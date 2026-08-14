@@ -1,3 +1,5 @@
 google-adk
 google-cloud-firestore
 pydantic
+fastapi
+uvicorn[standard]

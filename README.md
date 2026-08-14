@@ -1,8 +1,15 @@
 # Vör — "Trust, audited."
 
-Self-tuning confidence layer for Windows Event Log / Hayabusa-style alert
-triage. All Things Agentic Hackathon, **The Taskmaster** track (switched
-from Collaborative Partner — see rationale below).
+Vör is a self-tuning confidence layer for Windows Event Log / Hayabusa-style
+alert triage that decides when it's safe to autonomously suppress a known-benign
+alert and when to escalate to a human — without letting that trust go stale or
+unnoticed. A classifier agent makes the call; a separate auditor agent
+periodically re-checks past suppressions against the actual evidence behind
+them, with the authority to downgrade trust on its own but never to grant it
+without a human signing off.
+
+All Things Agentic Hackathon, **The Taskmaster** track (switched from
+Collaborative Partner — see rationale below).
 
 First real build step — everything before this was design (see full
 history in Obsidian `Projects/Adaptive-Alert-Agent/`).
@@ -46,6 +53,8 @@ architectural rigor is the strongest asset here.
 | `vor_agents/identity.py` | Pattern identity key, structural template, diff logic | No |
 | `vor_agents/enrichment.py` | Firestore reads/writes feeding the classifier | No |
 | `vor_agents/review_flag.py` | `under_review` race-condition fix | No |
+| `vor_agents/evidence_diversity.py` | Pure computation of evidence diversity from confirmed instances | No |
+| `vor_agents/blast_radius.py` | Hybrid curated table + gated proposal path for risk scoring | No |
 | `vor_agents/audit_targets.py` | Deterministic auditor target prioritization | No |
 | `vor_agents/classifier_agent.py` | ADK `Agent` definition, classifier prompt | Yes (Gemini) |
 | `vor_agents/auditor_agent.py` | ADK `Agent` definition, auditor prompt, separate context | Yes (Gemini) |
@@ -76,24 +85,116 @@ The auditor prompt (`auditor_agent.py`) now requires citing real
 inventing one, and allows citing *every* ID as an explicit full
 invalidation when the concern is genuinely pattern-wide.
 
+## Audit prioritization scoring — resolved
+Both inputs `select_audit_targets()` needed are now real:
+
+- **`evidence_diversity_score`** (`evidence_diversity.py`): pure
+  computation over `confirmed_instances` — distinct-value ratio across
+  host/user/hour-of-day, averaged. Catches the failure mode the auditor
+  prompt already warns about: 20 confirmations from the same host/user/
+  hour is weak evidence dressed up as strong.
+- **`blast_radius_estimate`** (`blast_radius.py`): hybrid design per
+  `BLAST_RADIUS_PLAYBOOK.md`. A curated table (`BLAST_RADIUS_TABLE`) maps
+  structural indicators (parent process, endpoint family) to a risk tier;
+  unmatched patterns default to HIGH, never LOW, so an unassessed pattern
+  isn't silently trusted. New entries can be proposed via
+  `propose_blast_radius()`, but that never writes the table directly —
+  CRITICAL/HIGH proposals may be added straight to the table (the safe
+  direction), MEDIUM/LOW proposals are gated behind human review (the
+  direction that reduces scrutiny, same asymmetry as the auditor's
+  DOWNGRADE/RECOMMEND_UPGRADE split).
+
+`_fetch_all_suppressed_patterns()` in `orchestrator.py` is now
+implemented using both, plus a `last_reviewed_at` timestamp (newly stamped
+by `clear_under_review()` on every audit outcome, not just downgrades) to
+compute `days_since_last_review`. Never-audited patterns get a large
+sentinel value rather than 0, so they don't look artificially low-priority.
+
+## Graduation threshold — resolved: two-part gate
+`GRADUATION_THRESHOLD = 3` alone was statistically weak: if a diffable
+field is genuinely variable rather than truly invariant (say a real 80/20
+split), the odds of 3 random confirmations all landing on the same value
+are roughly 51% — close to a coin flip that a "confirmed" template locks
+in a field as trusted when it isn't. Real review-volume data to calibrate
+against doesn't exist yet (same open gap as elsewhere in this design), so
+rather than guess at a "correct" count, graduation now requires **both**
+`instance_count >= GRADUATION_THRESHOLD` **and**
+`evidence_diversity_score >= MIN_DIVERSITY` (`identity.py`). Count alone
+can pass on repetition (same host/user/hour logged three times); diversity
+alone with too few instances is just noise. `MIN_DIVERSITY = 0.5` is a
+starting point, explicitly flagged as unvalidated, same as the count.
+
+Also fixed in the same pass: `enrich()` in `enrichment.py` was reading a
+field name (`evidence_diversity_score`) that never matched what any write
+path actually stored (`diversity_score`) — it was silently always
+returning the `0.0` default. Naming is now consistent across
+`build_structural_template()`'s return value, every Firestore write path,
+and `enrich()`'s read.
+
+## Cloud Run / Cloud Scheduler wiring — resolved
+`main.py`, `Dockerfile`, and `DEPLOY.md` added. `POST /classify` is the
+event-triggered primary path — a SUPPRESS decision means the pattern's
+identity key just matched an incoming alert again, exactly the trigger
+condition the hybrid cadence was designed around, so it fires an audit as
+a background task. `POST /sweep` is the scheduled safety net, meant to be
+hit weekly by Cloud Scheduler with an OIDC-authenticated request (see
+DEPLOY.md steps 2–3) — neither endpoint should ever be deployed with
+`--allow-unauthenticated`.
+
+`classify_alert()` now returns `(result, identity_key)` instead of just
+the `ClassifierOutput` — the identity key comes from `enrich()`'s
+deterministic computation, not from parsing the model's own
+`matched_pattern_id` text, which would have repeated the same fragile-
+split problem as gap #1 below, one layer less reliable since it'd also
+depend on the model formatting that string consistently.
+
+Also added: a guard in `/classify` that checks `under_review` before
+firing a background audit, so a burst of the same SUPPRESS-eligible
+pattern arriving faster than one audit completes doesn't schedule
+duplicate concurrent auditor calls for the same identity key.
+
+**Real caveat, not fully resolved**: firing an audit on every single
+SUPPRESS decision could get expensive at real alert volume — this wasn't
+throttled or sampled, just gated against duplicates. Worth revisiting
+with actual traffic data (same "no real volume to calibrate against" gap
+as `GRADUATION_THRESHOLD`/`MIN_DIVERSITY`) — a rate limit or sampling
+strategy per identity key is the likely fix once that data exists.
+
+**Also not resolved**: `/classify` has no actual trigger source wired up
+yet — nothing currently calls it. See DEPLOY.md step 4.
+
+## Precomputed deviations — resolved: asymmetric reconciliation
+`precomputed_deviations` is no longer computed-and-discarded. After the
+classifier agent returns, its reported deviations are compared against
+the deterministic diff by field name (not exact string match — the model
+isn't guaranteed to phrase `template=X, observed=Y` identically to the
+Python-generated version, so comparison is on which fields disagreed, not
+the literal text).
+
+Same asymmetry as everywhere else in this design:
+- **Ground truth found a deviation the model didn't report, and the model
+  still said SUPPRESS** — the dangerous direction. Overridden to ESCALATE
+  automatically, in code, not by asking the model to reconsider. The
+  override is recorded in the returned `reasoning` text so it's visible,
+  never silent.
+- **The model reported a deviation ground truth didn't find** — the model
+  being more cautious than the deterministic check. Safe direction, no
+  override, decision stands as-is.
+
+This closes the loop the original design flagged: the model's diffing was
+"authoritative" only in the sense that nothing was checking it. Now a
+model failing to notice a real deviation can't silently result in an
+autonomous SUPPRESS.
+
 ## Known gaps — not yet resolved
-1. `_fetch_all_suppressed_patterns()` in `orchestrator.py` is an
-   unimplemented stub — straightforward Firestore query once
-   `confidence_docs` has real data.
-2. `GRADUATION_THRESHOLD = 3` (in `identity.py`) still unvalidated against
-   expected review load.
-3. No Cloud Scheduler / Cloud Run wiring yet for the weekly sweep or the
-   event-trigger listener — `run_scheduled_sweep()` and `classify_alert()`
-   are ready to be called from either, but the trigger plumbing (Pub/Sub
-   topic, Cloud Scheduler job, Cloud Run endpoint) isn't built.
-4. `precomputed_deviations` in `orchestrator.classify_alert()` is computed
-   but currently unused — flagged as a future correctness check (compare
-   Python-computed deviations against what the model reports).
-5. `evidence_diversity_score` and `blast_radius_estimate` (referenced by
-   `select_audit_targets()`) still aren't defined anywhere — same open gap
-   from the design phase, not yet built.
+1. **Identity-key round-trip is fragile**: `_fetch_all_suppressed_patterns()`
+   reconstructs `identity_key` by splitting the Firestore doc ID on `"_"`
+   (`_doc_id()`'s join character). If any component of the key itself
+   contains an underscore (a rule ID or process name with one), this
+   split produces a wrong or over-segmented tuple. Not yet fixed — doc IDs
+   should probably use a safer delimiter or store the key as a separate
+   field instead of relying on the ID round-tripping.
 
 ## Not yet built
 - Dataset generation for the 6 synthetic cases
 - Seeding script using `enrichment.seed_template()`
-- Cloud Run deployment config
