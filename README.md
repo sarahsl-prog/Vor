@@ -131,6 +131,38 @@ returning the `0.0` default. Naming is now consistent across
 `build_structural_template()`'s return value, every Firestore write path,
 and `enrich()`'s read.
 
+## Cloud Run / Cloud Scheduler wiring — resolved
+`main.py`, `Dockerfile`, and `DEPLOY.md` added. `POST /classify` is the
+event-triggered primary path — a SUPPRESS decision means the pattern's
+identity key just matched an incoming alert again, exactly the trigger
+condition the hybrid cadence was designed around, so it fires an audit as
+a background task. `POST /sweep` is the scheduled safety net, meant to be
+hit weekly by Cloud Scheduler with an OIDC-authenticated request (see
+DEPLOY.md steps 2–3) — neither endpoint should ever be deployed with
+`--allow-unauthenticated`.
+
+`classify_alert()` now returns `(result, identity_key)` instead of just
+the `ClassifierOutput` — the identity key comes from `enrich()`'s
+deterministic computation, not from parsing the model's own
+`matched_pattern_id` text, which would have repeated the same fragile-
+split problem as gap #1 below, one layer less reliable since it'd also
+depend on the model formatting that string consistently.
+
+Also added: a guard in `/classify` that checks `under_review` before
+firing a background audit, so a burst of the same SUPPRESS-eligible
+pattern arriving faster than one audit completes doesn't schedule
+duplicate concurrent auditor calls for the same identity key.
+
+**Real caveat, not fully resolved**: firing an audit on every single
+SUPPRESS decision could get expensive at real alert volume — this wasn't
+throttled or sampled, just gated against duplicates. Worth revisiting
+with actual traffic data (same "no real volume to calibrate against" gap
+as `GRADUATION_THRESHOLD`/`MIN_DIVERSITY`) — a rate limit or sampling
+strategy per identity key is the likely fix once that data exists.
+
+**Also not resolved**: `/classify` has no actual trigger source wired up
+yet — nothing currently calls it. See DEPLOY.md step 4.
+
 ## Known gaps — not yet resolved
 1. **Identity-key round-trip is fragile**: `_fetch_all_suppressed_patterns()`
    reconstructs `identity_key` by splitting the Firestore doc ID on `"_"`
@@ -139,15 +171,10 @@ and `enrich()`'s read.
    split produces a wrong or over-segmented tuple. Not yet fixed — doc IDs
    should probably use a safer delimiter or store the key as a separate
    field instead of relying on the ID round-tripping.
-2. No Cloud Scheduler / Cloud Run wiring yet for the weekly sweep or the
-   event-trigger listener — `run_scheduled_sweep()` and `classify_alert()`
-   are ready to be called from either, but the trigger plumbing (Pub/Sub
-   topic, Cloud Scheduler job, Cloud Run endpoint) isn't built.
-3. `precomputed_deviations` in `orchestrator.classify_alert()` is computed
+2. `precomputed_deviations` in `orchestrator.classify_alert()` is computed
    but currently unused — flagged as a future correctness check (compare
    Python-computed deviations against what the model reports).
 
 ## Not yet built
 - Dataset generation for the 6 synthetic cases
 - Seeding script using `enrichment.seed_template()`
-- Cloud Run deployment config

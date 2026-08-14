@@ -47,7 +47,7 @@ async def _run_agent(agent, prompt_text: str, session_id: str) -> dict:
     return json.loads(result_text)
 
 
-async def classify_alert(alert: dict, firestore_client) -> ClassifierOutput:
+async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutput, tuple]:
     """
     Full classification path for one incoming alert:
       1. Deterministic enrichment (Firestore read + aggregation, no LLM)
@@ -60,6 +60,17 @@ async def classify_alert(alert: dict, firestore_client) -> ClassifierOutput:
          adding once this moves past hackathon-demo stage — flagging the
          hook here rather than building the comparison logic itself yet.
       3. Classifier agent call with enrichment serialized into the prompt
+
+    Returns (result, identity_key) — NOT just the ClassifierOutput. The
+    identity_key returned here is the one computed deterministically in
+    enrich(), not anything parsed from the model's own
+    matched_pattern_id text. A caller (e.g. the Cloud Run /classify
+    endpoint) that wants to trigger an audit off a SUPPRESS decision needs
+    a real identity key to hand to audit_pattern() — reconstructing one by
+    parsing LLM-generated text would repeat the same fragile-split problem
+    already flagged for _fetch_all_suppressed_patterns(), just one layer
+    less reliable since it would also depend on the model formatting that
+    string consistently.
     """
     enrichment = enrich(alert, firestore_client)
 
@@ -80,7 +91,7 @@ async def classify_alert(alert: dict, firestore_client) -> ClassifierOutput:
     result = await _run_agent(
         classifier, prompt, session_id=f"classify_{'_'.join(identity_key)}"
     )
-    return ClassifierOutput.model_validate(result)
+    return ClassifierOutput.model_validate(result), identity_key
 
 
 async def audit_pattern(
