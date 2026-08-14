@@ -47,19 +47,39 @@ async def _run_agent(agent, prompt_text: str, session_id: str) -> dict:
     return json.loads(result_text)
 
 
+def _deviation_field_names(deviation_strings: list[str]) -> set[str]:
+    """
+    Extracts just the field name from each deviation string (format:
+    "field_name: template=X, observed=Y" — see diff_alert_against_template()
+    and the schema description for structural_deviations_found). Comparing
+    by field name rather than exact string match is deliberate: the model
+    is asked to follow this format but isn't guaranteed to phrase the
+    template/observed values identically to the Python-computed version
+    (repr formatting, quoting, etc.) — field name is the part that actually
+    matters for reconciliation, not incidental text differences.
+    """
+    return {d.split(":", 1)[0].strip() for d in deviation_strings if d}
+
+
 async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutput, tuple]:
     """
     Full classification path for one incoming alert:
       1. Deterministic enrichment (Firestore read + aggregation, no LLM)
-      2. Deterministic diff pre-computation — NOTE: this is a deliberate
-         belt-and-suspenders choice. We diff in Python here AND ask the
-         model to diff in its reasoning. The model's output is what's
-         authoritative (it decides SUPPRESS/ESCALATE/UNCERTAIN), but
-         having the Python-computed deviation list available to compare
-         against the model's own list is a cheap correctness check worth
-         adding once this moves past hackathon-demo stage — flagging the
-         hook here rather than building the comparison logic itself yet.
+      2. Deterministic diff pre-computation, reconciled against the
+         model's own reported deviations AFTER the agent call (see below)
+         — this is no longer just a computed-but-unused hook.
       3. Classifier agent call with enrichment serialized into the prompt
+
+    Reconciliation is asymmetric, same shape as every other trust decision
+    in this system:
+      - If the deterministic diff found a deviation the model did NOT
+        report, and the model still said SUPPRESS, that's the dangerous
+        direction — the model missed something real. The decision is
+        overridden to ESCALATE; this never happens silently, the override
+        is recorded in the returned reasoning text.
+      - If the model reported a deviation the deterministic diff did NOT
+        find, that's the model being more cautious than ground truth —
+        the safe direction. No override; the model's decision stands.
 
     Returns (result, identity_key) — NOT just the ClassifierOutput. The
     identity_key returned here is the one computed deterministically in
@@ -91,7 +111,38 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
     result = await _run_agent(
         classifier, prompt, session_id=f"classify_{'_'.join(identity_key)}"
     )
-    return ClassifierOutput.model_validate(result), identity_key
+    classifier_output = ClassifierOutput.model_validate(result)
+
+    if precomputed_deviations:
+        precomputed_fields = _deviation_field_names(precomputed_deviations)
+        reported_fields = _deviation_field_names(classifier_output.structural_deviations_found)
+        missed_by_model = precomputed_fields - reported_fields
+
+        if missed_by_model and classifier_output.decision == "SUPPRESS":
+            # Dangerous direction — ground truth found a real deviation
+            # the model didn't report, yet it still said SUPPRESS. Never
+            # trust that; override deterministically, don't ask the model
+            # to reconsider (same "when in doubt, force the safe outcome
+            # in code, not via another LLM call" principle used for
+            # NO_HISTORY and under_review elsewhere in this design).
+            classifier_output = classifier_output.model_copy(update={
+                "decision": "ESCALATE",
+                "structural_deviations_found": sorted(
+                    set(classifier_output.structural_deviations_found) | set(precomputed_deviations)
+                ),
+                "reasoning": (
+                    classifier_output.reasoning
+                    + f" [Vör correctness override: deterministic diff found "
+                    f"deviation(s) in {sorted(missed_by_model)} that the model "
+                    f"did not report or act on; SUPPRESS overridden to ESCALATE.]"
+                ),
+            })
+        # The reverse case (model reported a deviation ground truth didn't
+        # find) is deliberately NOT overridden — the model being more
+        # cautious than the deterministic check is the safe direction and
+        # doesn't need correction, just isn't flagged as an error here.
+
+    return classifier_output, identity_key
 
 
 async def audit_pattern(

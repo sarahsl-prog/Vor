@@ -163,6 +163,29 @@ strategy per identity key is the likely fix once that data exists.
 **Also not resolved**: `/classify` has no actual trigger source wired up
 yet — nothing currently calls it. See DEPLOY.md step 4.
 
+## Precomputed deviations — resolved: asymmetric reconciliation
+`precomputed_deviations` is no longer computed-and-discarded. After the
+classifier agent returns, its reported deviations are compared against
+the deterministic diff by field name (not exact string match — the model
+isn't guaranteed to phrase `template=X, observed=Y` identically to the
+Python-generated version, so comparison is on which fields disagreed, not
+the literal text).
+
+Same asymmetry as everywhere else in this design:
+- **Ground truth found a deviation the model didn't report, and the model
+  still said SUPPRESS** — the dangerous direction. Overridden to ESCALATE
+  automatically, in code, not by asking the model to reconsider. The
+  override is recorded in the returned `reasoning` text so it's visible,
+  never silent.
+- **The model reported a deviation ground truth didn't find** — the model
+  being more cautious than the deterministic check. Safe direction, no
+  override, decision stands as-is.
+
+This closes the loop the original design flagged: the model's diffing was
+"authoritative" only in the sense that nothing was checking it. Now a
+model failing to notice a real deviation can't silently result in an
+autonomous SUPPRESS.
+
 ## Known gaps — not yet resolved
 1. **Identity-key round-trip is fragile**: `_fetch_all_suppressed_patterns()`
    reconstructs `identity_key` by splitting the Firestore doc ID on `"_"`
@@ -171,9 +194,6 @@ yet — nothing currently calls it. See DEPLOY.md step 4.
    split produces a wrong or over-segmented tuple. Not yet fixed — doc IDs
    should probably use a safer delimiter or store the key as a separate
    field instead of relying on the ID round-tripping.
-2. `precomputed_deviations` in `orchestrator.classify_alert()` is computed
-   but currently unused — flagged as a future correctness check (compare
-   Python-computed deviations against what the model reports).
 
 ## Not yet built
 - Dataset generation for the 6 synthetic cases
