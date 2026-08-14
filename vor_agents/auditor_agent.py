@@ -13,6 +13,7 @@ NO_ACTION / DOWNGRADE / RECOMMEND_UPGRADE_FOR_HUMAN_REVIEW and explain why.
 """
 
 from google.adk.agents import Agent
+
 from .schemas import AuditorOutput
 
 AUDITOR_SYSTEM_PROMPT = """You are a red-team auditor reviewing a past SUPPRESS decision made by a

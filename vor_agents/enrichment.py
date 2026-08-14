@@ -8,7 +8,7 @@ fetches this itself.
 
 import uuid
 
-from .identity import pattern_identity_key, build_structural_template
+from .identity import build_structural_template, pattern_identity_key
 
 CONFIDENCE_COLLECTION = "confidence_docs"
 
@@ -85,7 +85,12 @@ def record_confirmed_negative(
     # Every stored instance gets a stable ID so the auditor can later
     # point at specific instances to invalidate rather than only being
     # able to distrust the pattern as a whole (see invalidate_instances()).
-    instances.append({**alert, "instance_id": str(uuid.uuid4())})
+    # Preserve an existing instance_id if the alert already has one
+    # (matches seed_template()'s behavior) rather than always minting a
+    # new one — found via testing: this function previously always
+    # overwrote instance_id, which silently discarded IDs a caller had
+    # already assigned.
+    instances.append({**alert, "instance_id": alert.get("instance_id", str(uuid.uuid4()))})
 
     template = build_structural_template(instances, provenance="live")
     doc_ref.set(
