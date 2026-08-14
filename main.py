@@ -16,11 +16,11 @@ Exposes the two trigger paths from the hybrid cadence decision:
 See DEPLOY.md for how this actually gets deployed and secured.
 """
 
-from fastapi import FastAPI, BackgroundTasks, Request
-
-from vor_agents.orchestrator import classify_alert, audit_pattern, run_scheduled_sweep
-from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+from fastapi import BackgroundTasks, FastAPI, Request
 from google.cloud import firestore
+
+from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
 
 app = FastAPI(title="Vör")
 _firestore_client = None

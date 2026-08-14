@@ -9,6 +9,7 @@ whole output_schema-vs-tools question rather than depending on it.
 """
 
 from google.adk.agents import Agent
+
 from .schemas import ClassifierOutput
 
 CLASSIFIER_SYSTEM_PROMPT = """You are an alert triage classifier for Windows Event Log / Sysmon data.

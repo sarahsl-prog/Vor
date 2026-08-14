@@ -7,8 +7,9 @@ prompt: when in doubt, force a deterministic degrade rather than trusting
 a model to notice the ambiguity itself.
 """
 
-from .enrichment import CONFIDENCE_COLLECTION, _doc_id, invalidate_instances
 from datetime import datetime, timezone
+
+from .enrichment import CONFIDENCE_COLLECTION, _doc_id, invalidate_instances
 
 
 def mark_under_review(pattern_identity_key: tuple, firestore_client) -> None:

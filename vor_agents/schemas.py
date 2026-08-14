@@ -9,7 +9,7 @@ contract (JSON schema for documentation/reference, Pydantic for runtime).
 """
 
 from enum import Enum
-from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -29,7 +29,7 @@ class UncertainReason(str, Enum):
 
 class ClassifierOutput(BaseModel):
     decision: Decision
-    matched_pattern_id: Optional[str] = Field(
+    matched_pattern_id: str | None = Field(
         default=None,
         description="Identity key string this was compared against, or null",
     )
@@ -43,7 +43,7 @@ class ClassifierOutput(BaseModel):
         "not just the first. Format: 'field_name: template=X, observed=Y'.",
     )
     reasoning: str
-    confidence_used: Optional[float] = None
+    confidence_used: float | None = None
 
 
 class AuditorAction(str, Enum):
