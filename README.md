@@ -1,8 +1,15 @@
 # Vör — "Trust, audited."
 
-Self-tuning confidence layer for Windows Event Log / Hayabusa-style alert
-triage. All Things Agentic Hackathon, **The Taskmaster** track (switched
-from Collaborative Partner — see rationale below).
+Vör is a self-tuning confidence layer for Windows Event Log / Hayabusa-style
+alert triage that decides when it's safe to autonomously suppress a known-benign
+alert and when to escalate to a human — without letting that trust go stale or
+unnoticed. A classifier agent makes the call; a separate auditor agent
+periodically re-checks past suppressions against the actual evidence behind
+them, with the authority to downgrade trust on its own but never to grant it
+without a human signing off.
+
+All Things Agentic Hackathon, **The Taskmaster** track (switched from
+Collaborative Partner — see rationale below).
 
 First real build step — everything before this was design (see full
 history in Obsidian `Projects/Adaptive-Alert-Agent/`).
