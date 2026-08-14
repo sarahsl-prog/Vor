@@ -17,7 +17,10 @@ from .enrichment import enrich, CONFIDENCE_COLLECTION, _doc_id
 from .identity import diff_alert_against_template
 from .review_flag import mark_under_review, clear_under_review
 from .audit_targets import select_audit_targets
+from .evidence_diversity import evidence_diversity_score
+from .blast_radius import estimate_blast_radius
 from .schemas import ClassifierOutput, AuditorOutput
+from datetime import datetime, timezone
 
 session_service = InMemorySessionService()  # swap for a persistent
                                              # SessionService in production;
@@ -141,15 +144,53 @@ async def run_scheduled_sweep(firestore_client, max_targets: int = 10) -> list:
 
 def _fetch_all_suppressed_patterns(firestore_client) -> list[dict]:
     """
-    Placeholder — real implementation queries CONFIDENCE_COLLECTION for
-    tier == "confirmed" docs and shapes them into the dict format
-    select_audit_targets() expects (days_since_last_review,
-    evidence_diversity_score, blast_radius_estimate, identity_key).
-    Left unimplemented here since it's a straight Firestore query, not a
-    design decision — fill in against your actual schema once Firestore
-    is provisioned.
+    Queries CONFIDENCE_COLLECTION for tier == "confirmed" docs and shapes
+    them into what select_audit_targets() expects: days_since_last_review,
+    evidence_diversity_score, blast_radius_estimate, identity_key.
+
+    days_since_last_review: computed from last_reviewed_at (stamped by
+    clear_under_review() on every audit, not just downgrades). A pattern
+    that has NEVER been audited gets a large sentinel value (9999) rather
+    than 0 — same "unassessed defaults to needs-attention" principle used
+    for blast_radius_estimate's UNSCORED_DEFAULT. A freshly-graduated
+    pattern that's never once been checked by the auditor should not look
+    lower-priority than one reviewed yesterday.
+
+    evidence_diversity_score / blast_radius_estimate: computed fresh from
+    stored confirmed_instances on every call rather than cached on the doc
+    — both are cheap pure functions, and recomputing avoids the staleness
+    risk of a cached score surviving past an invalidate_instances() call
+    that changed the underlying evidence.
     """
-    raise NotImplementedError(
-        "Wire this to a real Firestore query once the confidence_docs "
-        "collection has data — see CONFIDENCE_COLLECTION in enrichment.py"
-    )
+    docs = firestore_client.collection(CONFIDENCE_COLLECTION).where(
+        "tier", "==", "confirmed"
+    ).stream()
+
+    patterns = []
+    for doc in docs:
+        data = doc.to_dict()
+        instances = data.get("confirmed_instances", [])
+        if not instances:
+            continue  # confirmed tier with no instances shouldn't occur, but skip defensively
+
+        last_reviewed_at = data.get("last_reviewed_at")
+        if last_reviewed_at:
+            reviewed_dt = datetime.fromisoformat(last_reviewed_at)
+            days_since = (datetime.now(timezone.utc) - reviewed_dt).days
+        else:
+            days_since = 9999  # never audited — treat as maximally stale
+
+        patterns.append({
+            "identity_key": tuple(doc.id.split("_")),
+            "days_since_last_review": days_since,
+            "evidence_diversity_score": evidence_diversity_score(instances),
+            # Worst case across ALL instances, not just the first —
+            # different confirmed instances of the same pattern can carry
+            # different indicator values (e.g. different hosts with
+            # different privilege contexts), and blast radius is
+            # deliberately a worst-case estimate throughout this design.
+            "blast_radius_estimate": max(
+                estimate_blast_radius(instance) for instance in instances
+            ),
+        })
+    return patterns

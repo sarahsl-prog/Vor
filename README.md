@@ -46,6 +46,8 @@ architectural rigor is the strongest asset here.
 | `vor_agents/identity.py` | Pattern identity key, structural template, diff logic | No |
 | `vor_agents/enrichment.py` | Firestore reads/writes feeding the classifier | No |
 | `vor_agents/review_flag.py` | `under_review` race-condition fix | No |
+| `vor_agents/evidence_diversity.py` | Pure computation of evidence diversity from confirmed instances | No |
+| `vor_agents/blast_radius.py` | Hybrid curated table + gated proposal path for risk scoring | No |
 | `vor_agents/audit_targets.py` | Deterministic auditor target prioritization | No |
 | `vor_agents/classifier_agent.py` | ADK `Agent` definition, classifier prompt | Yes (Gemini) |
 | `vor_agents/auditor_agent.py` | ADK `Agent` definition, auditor prompt, separate context | Yes (Gemini) |
@@ -76,10 +78,39 @@ The auditor prompt (`auditor_agent.py`) now requires citing real
 inventing one, and allows citing *every* ID as an explicit full
 invalidation when the concern is genuinely pattern-wide.
 
+## Audit prioritization scoring — resolved
+Both inputs `select_audit_targets()` needed are now real:
+
+- **`evidence_diversity_score`** (`evidence_diversity.py`): pure
+  computation over `confirmed_instances` — distinct-value ratio across
+  host/user/hour-of-day, averaged. Catches the failure mode the auditor
+  prompt already warns about: 20 confirmations from the same host/user/
+  hour is weak evidence dressed up as strong.
+- **`blast_radius_estimate`** (`blast_radius.py`): hybrid design per
+  `BLAST_RADIUS_PLAYBOOK.md`. A curated table (`BLAST_RADIUS_TABLE`) maps
+  structural indicators (parent process, endpoint family) to a risk tier;
+  unmatched patterns default to HIGH, never LOW, so an unassessed pattern
+  isn't silently trusted. New entries can be proposed via
+  `propose_blast_radius()`, but that never writes the table directly —
+  CRITICAL/HIGH proposals may be added straight to the table (the safe
+  direction), MEDIUM/LOW proposals are gated behind human review (the
+  direction that reduces scrutiny, same asymmetry as the auditor's
+  DOWNGRADE/RECOMMEND_UPGRADE split).
+
+`_fetch_all_suppressed_patterns()` in `orchestrator.py` is now
+implemented using both, plus a `last_reviewed_at` timestamp (newly stamped
+by `clear_under_review()` on every audit outcome, not just downgrades) to
+compute `days_since_last_review`. Never-audited patterns get a large
+sentinel value rather than 0, so they don't look artificially low-priority.
+
 ## Known gaps — not yet resolved
-1. `_fetch_all_suppressed_patterns()` in `orchestrator.py` is an
-   unimplemented stub — straightforward Firestore query once
-   `confidence_docs` has real data.
+1. **Identity-key round-trip is fragile**: `_fetch_all_suppressed_patterns()`
+   reconstructs `identity_key` by splitting the Firestore doc ID on `"_"`
+   (`_doc_id()`'s join character). If any component of the key itself
+   contains an underscore (a rule ID or process name with one), this
+   split produces a wrong or over-segmented tuple. Not yet fixed — doc IDs
+   should probably use a safer delimiter or store the key as a separate
+   field instead of relying on the ID round-tripping.
 2. `GRADUATION_THRESHOLD = 3` (in `identity.py`) still unvalidated against
    expected review load.
 3. No Cloud Scheduler / Cloud Run wiring yet for the weekly sweep or the
@@ -89,9 +120,6 @@ invalidation when the concern is genuinely pattern-wide.
 4. `precomputed_deviations` in `orchestrator.classify_alert()` is computed
    but currently unused — flagged as a future correctness check (compare
    Python-computed deviations against what the model reports).
-5. `evidence_diversity_score` and `blast_radius_estimate` (referenced by
-   `select_audit_targets()`) still aren't defined anywhere — same open gap
-   from the design phase, not yet built.
 
 ## Not yet built
 - Dataset generation for the 6 synthetic cases

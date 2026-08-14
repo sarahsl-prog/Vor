@@ -8,6 +8,7 @@ a model to notice the ambiguity itself.
 """
 
 from .enrichment import CONFIDENCE_COLLECTION, _doc_id, invalidate_instances
+from datetime import datetime, timezone
 
 
 def mark_under_review(pattern_identity_key: tuple, firestore_client) -> None:
@@ -33,6 +34,11 @@ def clear_under_review(
     separate write, so there's no window where the flag is false but the
     confidence data hasn't landed yet.
 
+    Also stamps last_reviewed_at on every call, not just DOWNGRADE — an
+    audit that found nothing wrong (NO_ACTION) is still evidence the
+    pattern was looked at, which is exactly what select_audit_targets()
+    needs to know to stop re-prioritizing it every sweep.
+
     DOWNGRADE resolution — targeted evidence invalidation, decided over
     the blanket "demote tier to provisional" alternative: the auditor
     cites specific confirmed_instance IDs it no longer trusts
@@ -47,7 +53,10 @@ def clear_under_review(
         _doc_id(pattern_identity_key)
     )
 
-    update = {"under_review": False}
+    update = {
+        "under_review": False,
+        "last_reviewed_at": datetime.now(timezone.utc).isoformat(),
+    }
     if auditor_decision["action"] == "DOWNGRADE":
         rebuild = invalidate_instances(
             pattern_identity_key,
