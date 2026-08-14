@@ -1,5 +1,6 @@
 google-adk
 google-cloud-firestore
+google-cloud-tasks
 pydantic
 fastapi
 uvicorn[standard]
