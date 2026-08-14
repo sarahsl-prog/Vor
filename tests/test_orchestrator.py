@@ -126,3 +126,35 @@ class TestReconciliation:
 
         assert result.decision == "UNCERTAIN"
         assert result.uncertain_reason == "no_history"
+
+
+@pytest.mark.asyncio
+class TestSessionUniqueness:
+    """
+    Regression coverage for the session-reuse gap: session_id was
+    previously derived only from identity_key, so every classify_alert()
+    call for the same recurring pattern reused the exact same ADK
+    session — accumulating conversation history across calls instead of
+    each call getting an independent judgment, contradicting the
+    stateless-per-call design stated in enrichment.py's docstring.
+    """
+
+    async def test_repeated_calls_for_same_pattern_get_distinct_session_ids(
+        self, fake_firestore, baseline_alert
+    ):
+        fake_model_response = {
+            "decision": "UNCERTAIN",
+            "matched_pattern_id": None,
+            "uncertain_reason": "no_history",
+            "structural_deviations_found": [],
+            "reasoning": "No prior history for this pattern.",
+            "confidence_used": None,
+        }
+        mock_run_agent = AsyncMock(return_value=fake_model_response)
+        with patch("vor_agents.orchestrator._run_agent", new=mock_run_agent):
+            await classify_alert(baseline_alert, fake_firestore)
+            await classify_alert(baseline_alert, fake_firestore)
+
+        first_session_id = mock_run_agent.call_args_list[0].kwargs["session_id"]
+        second_session_id = mock_run_agent.call_args_list[1].kwargs["session_id"]
+        assert first_session_id != second_session_id

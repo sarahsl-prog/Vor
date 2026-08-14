@@ -6,6 +6,7 @@ auditor_agent.py) with no orchestration logic of its own.
 """
 
 import json
+import uuid
 from datetime import datetime, timezone
 
 from google.adk.runners import Runner
@@ -108,8 +109,15 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
 
     classifier = build_classifier_agent()
     identity_key = enrichment.get("pattern_identity_key", ("unknown",))
+    # session_id is unique per call (uuid4), not just per identity_key: the
+    # classifier is meant to be stateless per-call (see enrich()'s
+    # docstring — "reasons over exactly this, nothing more"). Reusing a
+    # session_id across repeat calls for the same recurring pattern would
+    # let ADK accumulate conversation history into the same session,
+    # silently biasing later calls with earlier turns. identity_key is
+    # kept as a log-correlation prefix only, not as the dedup key.
     result = await _run_agent(
-        classifier, prompt, session_id=f"classify_{'_'.join(identity_key)}"
+        classifier, prompt, session_id=f"classify_{'_'.join(identity_key)}_{uuid.uuid4()}"
     )
     classifier_output = ClassifierOutput.model_validate(result)
 
@@ -174,8 +182,11 @@ async def audit_pattern(
         "Review this suppression decision per your instructions."
     )
     auditor = build_auditor_agent()
+    # Same unique-session-per-call rationale as classify_alert() above —
+    # each audit is a fresh, independent review, not a continuation of a
+    # prior one for this pattern.
     result = await _run_agent(
-        auditor, prompt, session_id=f"audit_{'_'.join(identity_key)}"
+        auditor, prompt, session_id=f"audit_{'_'.join(identity_key)}_{uuid.uuid4()}"
     )
     decision = AuditorOutput.model_validate(result)
 
