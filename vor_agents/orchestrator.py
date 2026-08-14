@@ -150,6 +150,29 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
         # cautious than the deterministic check is the safe direction and
         # doesn't need correction, just isn't flagged as an error here.
 
+    if classifier_output.structural_deviations_found and classifier_output.decision == "SUPPRESS":
+        # Self-consistency override, independent of the ground-truth
+        # reconciliation above (and of whether it even ran — this fires
+        # even when precomputed_deviations is empty). The classifier's own
+        # prompt (rule 4) requires any non-empty structural_deviations_found
+        # to force ESCALATE; nothing previously enforced that internally,
+        # so a model reporting a deviation (real or hallucinated) while
+        # still emitting SUPPRESS sailed through untouched whenever that
+        # deviation wasn't also in the deterministic diff. Same "force the
+        # safe outcome in code" principle as the check above — a model
+        # contradicting its own stated rule can't be trusted regardless of
+        # what ground truth separately found.
+        classifier_output = classifier_output.model_copy(update={
+            "decision": "ESCALATE",
+            "reasoning": (
+                classifier_output.reasoning
+                + " [Vör correctness override: model reported structural "
+                "deviation(s) but decision was SUPPRESS, contradicting its "
+                "own classification rule that any deviation forces "
+                "ESCALATE; overridden to ESCALATE.]"
+            ),
+        })
+
     return classifier_output, identity_key
 
 

@@ -129,6 +129,74 @@ class TestReconciliation:
 
 
 @pytest.mark.asyncio
+class TestSelfConsistency:
+    """
+    The classifier's own prompt (rule 4 in CLASSIFIER_SYSTEM_PROMPT) says
+    ANY non-empty structural_deviations_found must force ESCALATE. Nothing
+    previously enforced that internally -- the reconciliation block only
+    cross-checked the model's reported deviations against the
+    deterministic diff, and was skipped entirely when the deterministic
+    diff found nothing (the 'if precomputed_deviations:' guard). A model
+    that reports a deviation not present in the deterministic set (e.g.
+    hallucinated, or on a non-diffable field) but still emits SUPPRESS
+    sailed through untouched. This must be caught independent of what the
+    deterministic diff found.
+    """
+
+    async def test_supress_with_self_reported_deviation_gets_overridden(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances
+    ):
+        """baseline_alert matches the graduated template exactly, so the
+        deterministic diff finds NOTHING (precomputed_deviations == []),
+        meaning the ground-truth reconciliation block wouldn't even run.
+        The model self-contradicts anyway: SUPPRESS decision, but a
+        non-empty structural_deviations_found -- must still be overridden
+        to ESCALATE."""
+        await _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances)
+
+        fake_model_response = {
+            "decision": "SUPPRESS",
+            "matched_pattern_id": "test",
+            "uncertain_reason": "not_applicable",
+            "structural_deviations_found": ["integrity_level: template=Medium, observed=High"],
+            "reasoning": "Reported a deviation but suppressed anyway.",
+            "confidence_used": 0.9,
+        }
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(return_value=fake_model_response),
+        ):
+            result, _identity_key = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "ESCALATE"
+        assert "override" in result.reasoning.lower()
+
+    async def test_escalate_with_self_reported_deviation_not_touched(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances
+    ):
+        """Sanity check: a self-consistent ESCALATE (deviation reported,
+        decision already ESCALATE) must not be needlessly re-flagged."""
+        await _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances)
+
+        fake_model_response = {
+            "decision": "ESCALATE",
+            "matched_pattern_id": "test",
+            "uncertain_reason": "not_applicable",
+            "structural_deviations_found": ["integrity_level: template=Medium, observed=High"],
+            "reasoning": "Deviation found, escalating as instructed.",
+            "confidence_used": None,
+        }
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(return_value=fake_model_response),
+        ):
+            result, _identity_key = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "ESCALATE"
+        assert "override" not in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
 class TestSessionUniqueness:
     """
     Regression coverage for the session-reuse gap: session_id was
