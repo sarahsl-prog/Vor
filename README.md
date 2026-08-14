@@ -1,10 +1,42 @@
 # Vör — "Trust, audited."
 
 Self-tuning confidence layer for Windows Event Log / Hayabusa-style alert
-triage. All Things Agentic Hackathon, Collaborative Partner track.
+triage. All Things Agentic Hackathon, **The Taskmaster** track (switched
+from Collaborative Partner — see rationale below).
 
 First real build step — everything before this was design (see full
 history in Obsidian `Projects/Adaptive-Alert-Agent/`).
+
+## Track — The Taskmaster
+Switched from Collaborative Partner after the design pivoted from
+personalization (Mimir-era) toward audit/trust. Judging rubric is the same
+across all tracks (40% Innovation & Operational Utility, 30% Architectural
+Discipline & Tech Stack, 30% Demo & Production Readiness), so track choice
+affects framing and prize pool, not scoring mechanics.
+
+- **Collaborative Partner ruled out**: actual track wording is "ask
+  clarifying questions, guide the user step-by-step... adapts to the
+  user's unique way of thinking" — a live human-facing coaching loop. Vör
+  has no user turn-taking left at all.
+- **Fortified Enterprise Fleet considered and ruled out despite strong
+  thematic fit** ("audit their reasoning, trust their data handling, scale
+  them safely" almost literally describes what the auditor agent does):
+  the real submission bar is heavier than it first looked — Agent
+  Registry, Agent Identity, Agent Gateway, Model Armor, Agent
+  Observability, cross-department cataloging, weeks-long async state.
+  Vör today is one Firestore collection and two agents; getting to a
+  genuine (not just thematic) fit was too much added scope this close to
+  the deadline.
+- **Taskmaster fits without added scope**: "Make one that takes action...
+  handles the details... proves it can do the heavy lifting for you."
+  Maps directly onto the classifier autonomously deciding
+  SUPPRESS/ESCALATE/UNCERTAIN with no human in the loop for the common
+  case — hits the 40%-weighted "autonomous, high-value action... little
+  to no hand-holding" criterion using the architecture already built.
+
+Also worth targeting regardless of main track: **Best Architectural
+Design** ($5,000, 2 winners) is a track-agnostic bonus category, and
+architectural rigor is the strongest asset here.
 
 ## Structure
 
