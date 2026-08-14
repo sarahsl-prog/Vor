@@ -30,12 +30,15 @@ def enrich(alert: dict, firestore_client) -> dict:
             "provenance": "live" | "seeded",
             "under_review": bool,
             "days_since_last_review": int,
-            "evidence_diversity_score": float,
+            "diversity_score": float,
         }
 
     This dict is what gets serialized into the classifier's prompt context
     — the agent reasons over exactly this, nothing more, nothing fetched
-    on its own.
+    on its own. diversity_score here is informational context for the
+    classifier's reasoning (not a gate — graduation already enforced
+    MIN_DIVERSITY before this pattern could reach "confirmed" tier at
+    all); it is NOT used to re-decide tier at classification time.
     """
     identity_key = pattern_identity_key(alert)
     doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(
@@ -55,7 +58,7 @@ def enrich(alert: dict, firestore_client) -> dict:
         "provenance": data.get("provenance", "live"),
         "under_review": data.get("under_review", False),
         "days_since_last_review": data.get("days_since_last_review", 0),
-        "evidence_diversity_score": data.get("evidence_diversity_score", 0.0),
+        "diversity_score": data.get("diversity_score", 0.0),
     }
 
 
@@ -92,6 +95,7 @@ def record_confirmed_negative(
             "tier": template["tier"],
             "provenance": template["provenance"],
             "instance_count": template["instance_count"],
+            "diversity_score": template["diversity_score"],
             "under_review": False,
         },
         merge=True,
@@ -123,6 +127,7 @@ def seed_template(
             "tier": template["tier"],
             "provenance": template["provenance"],
             "instance_count": template["instance_count"],
+            "diversity_score": template["diversity_score"],
             "under_review": False,
         },
         merge=True,
@@ -165,4 +170,5 @@ def invalidate_instances(
         "fields": template["fields"],
         "tier": template["tier"],
         "instance_count": template["instance_count"],
+        "diversity_score": template["diversity_score"],
     }

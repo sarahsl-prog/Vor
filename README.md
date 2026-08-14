@@ -110,6 +110,27 @@ by `clear_under_review()` on every audit outcome, not just downgrades) to
 compute `days_since_last_review`. Never-audited patterns get a large
 sentinel value rather than 0, so they don't look artificially low-priority.
 
+## Graduation threshold — resolved: two-part gate
+`GRADUATION_THRESHOLD = 3` alone was statistically weak: if a diffable
+field is genuinely variable rather than truly invariant (say a real 80/20
+split), the odds of 3 random confirmations all landing on the same value
+are roughly 51% — close to a coin flip that a "confirmed" template locks
+in a field as trusted when it isn't. Real review-volume data to calibrate
+against doesn't exist yet (same open gap as elsewhere in this design), so
+rather than guess at a "correct" count, graduation now requires **both**
+`instance_count >= GRADUATION_THRESHOLD` **and**
+`evidence_diversity_score >= MIN_DIVERSITY` (`identity.py`). Count alone
+can pass on repetition (same host/user/hour logged three times); diversity
+alone with too few instances is just noise. `MIN_DIVERSITY = 0.5` is a
+starting point, explicitly flagged as unvalidated, same as the count.
+
+Also fixed in the same pass: `enrich()` in `enrichment.py` was reading a
+field name (`evidence_diversity_score`) that never matched what any write
+path actually stored (`diversity_score`) — it was silently always
+returning the `0.0` default. Naming is now consistent across
+`build_structural_template()`'s return value, every Firestore write path,
+and `enrich()`'s read.
+
 ## Known gaps — not yet resolved
 1. **Identity-key round-trip is fragile**: `_fetch_all_suppressed_patterns()`
    reconstructs `identity_key` by splitting the Firestore doc ID on `"_"`
@@ -118,13 +139,11 @@ sentinel value rather than 0, so they don't look artificially low-priority.
    split produces a wrong or over-segmented tuple. Not yet fixed — doc IDs
    should probably use a safer delimiter or store the key as a separate
    field instead of relying on the ID round-tripping.
-2. `GRADUATION_THRESHOLD = 3` (in `identity.py`) still unvalidated against
-   expected review load.
-3. No Cloud Scheduler / Cloud Run wiring yet for the weekly sweep or the
+2. No Cloud Scheduler / Cloud Run wiring yet for the weekly sweep or the
    event-trigger listener — `run_scheduled_sweep()` and `classify_alert()`
    are ready to be called from either, but the trigger plumbing (Pub/Sub
    topic, Cloud Scheduler job, Cloud Run endpoint) isn't built.
-4. `precomputed_deviations` in `orchestrator.classify_alert()` is computed
+3. `precomputed_deviations` in `orchestrator.classify_alert()` is computed
    but currently unused — flagged as a future correctness check (compare
    Python-computed deviations against what the model reports).
 
