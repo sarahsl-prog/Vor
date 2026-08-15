@@ -27,7 +27,7 @@ from google.cloud import firestore, tasks_v2
 from loguru import logger
 
 from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
-from vor_agents.schemas import AuditRequest
+from vor_agents.schemas import AuditRequest, ClassifierRequest
 from vor_agents.task_queue import AuditEnqueueError, enqueue_audit
 
 app = FastAPI(title="Vör")
@@ -98,8 +98,14 @@ async def healthz():
 
 
 @app.post("/classify")
-async def classify(request: Request):
-    alert = await request.json()
+async def classify(payload: ClassifierRequest):
+    """
+    payload is validated by FastAPI/pydantic before this body runs, same
+    pattern as /audit below — a missing identity field (previously a raw
+    KeyError-turned-500 out of pattern_identity_key()) or an invalid JSON
+    body (previously an unhandled JSONDecodeError) both return 422 instead.
+    """
+    alert = payload.model_dump()
     client = get_firestore_client()
     result, identity_key = await classify_alert(alert, client)
 

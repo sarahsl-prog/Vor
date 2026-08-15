@@ -26,6 +26,18 @@ TASK_ENV = {
 }
 
 
+def _full_alert():
+    """Minimal alert satisfying ClassifierRequest's four required
+    identity fields. classify_alert is mocked in every test below, so
+    only the shape (not the content) needs to pass validation."""
+    return {
+        "detection_rule_id": "rule",
+        "parent_image": "w3wp.exe",
+        "child_image": "csc.exe",
+        "endpoint_family": "family",
+    }
+
+
 def _suppress_result():
     return ClassifierOutput(
         decision=Decision.SUPPRESS,
@@ -53,7 +65,7 @@ def test_classify_enqueues_audit_task_on_suppress(fake_firestore, fake_tasks_cli
          patch("main.get_tasks_client", return_value=fake_tasks_client), \
          patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
-        resp = client.post("/classify", json={"detection_rule_id": "rule"})
+        resp = client.post("/classify", json=_full_alert())
 
     assert resp.status_code == 200
     assert resp.json()["decision"] == "SUPPRESS"
@@ -73,8 +85,8 @@ def test_classify_does_not_enqueue_second_task_for_same_pattern(
          patch("main.get_tasks_client", return_value=fake_tasks_client), \
          patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
-        client.post("/classify", json={"detection_rule_id": "rule"})
-        client.post("/classify", json={"detection_rule_id": "rule"})
+        client.post("/classify", json=_full_alert())
+        client.post("/classify", json=_full_alert())
 
     assert len(fake_tasks_client.created_tasks) == 1
 
@@ -97,7 +109,7 @@ def test_classify_returns_result_even_if_enqueue_fails(fake_firestore, monkeypat
          patch("main.get_tasks_client", return_value=_BoomTasksClient()), \
          patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
-        resp = client.post("/classify", json={"detection_rule_id": "rule"})
+        resp = client.post("/classify", json=_full_alert())
 
     assert resp.status_code == 200
     assert resp.json()["decision"] == "SUPPRESS"
@@ -127,7 +139,7 @@ def test_classify_returns_result_even_if_task_env_var_missing(
          patch("main.get_tasks_client", return_value=fake_tasks_client), \
          patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
-        resp = client.post("/classify", json={"detection_rule_id": "rule"})
+        resp = client.post("/classify", json=_full_alert())
 
     assert resp.status_code == 200
     assert resp.json()["decision"] == "SUPPRESS"
@@ -188,3 +200,64 @@ def test_audit_endpoint_rejects_non_json_body(fake_firestore):
         resp = client.post("/audit", content=b"not json", headers={"content-type": "application/json"})
 
     assert resp.status_code == 422
+
+
+def test_classify_rejects_missing_identity_fields(fake_firestore):
+    """Regression coverage: pattern_identity_key() indexes an alert dict
+    directly (alert["field"]), so a request missing one of the four
+    identity fields previously raised a raw KeyError-turned-500. Must now
+    be a clean 422 from Pydantic/FastAPI request validation, before
+    classify_alert() ever runs."""
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/classify", json={"detection_rule_id": "rule"})
+
+    assert resp.status_code == 422
+
+
+def test_classify_rejects_invalid_json_body(fake_firestore):
+    """Regression coverage: a non-JSON body previously raised an
+    unhandled json.decoder.JSONDecodeError out of `await request.json()`,
+    surfacing as a 500. Switching /classify to a Pydantic body param
+    means FastAPI's own request-parsing layer rejects this before main.py
+    code runs at all."""
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post(
+            "/classify", content=b"not json", headers={"content-type": "application/json"}
+        )
+
+    assert resp.status_code == 422
+
+
+def test_classify_allows_extra_context_fields(
+    fake_firestore, fake_tasks_client, monkeypatch
+):
+    """extra="allow" on ClassifierRequest: fields beyond the four required
+    identity ones (DIFFABLE_FIELDS, host/user/timestamp, or anything an
+    alert schema might add later) must pass through to classify_alert(),
+    not get silently stripped by validation."""
+    for key, value in TASK_ENV.items():
+        monkeypatch.setenv(key, value)
+    identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+    alert_with_extras = {
+        **_full_alert(),
+        "integrity_level": "Medium",
+        "host": "SRV-01",
+    }
+
+    captured_alert = {}
+
+    async def _fake_classify_alert(alert, client):
+        captured_alert.update(alert)
+        return _suppress_result(), identity_key
+
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch("main.get_tasks_client", return_value=fake_tasks_client), \
+         patch("main.classify_alert", new=_fake_classify_alert):
+        client = TestClient(main.app)
+        resp = client.post("/classify", json=alert_with_extras)
+
+    assert resp.status_code == 200
+    assert captured_alert["integrity_level"] == "Medium"
+    assert captured_alert["host"] == "SRV-01"
