@@ -18,6 +18,7 @@ import pytest
 
 from vor_agents.enrichment import record_confirmed_negative
 from vor_agents.orchestrator import classify_alert, run_scheduled_sweep
+from vor_agents.review_flag import mark_under_review
 
 
 async def _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances):
@@ -194,6 +195,72 @@ class TestSelfConsistency:
 
         assert result.decision == "ESCALATE"
         assert "override" not in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
+class TestUnderReviewBlocksSuppress:
+    """
+    Regression coverage for the "model non-compliance during an active
+    audit" gap: the classifier prompt tells the model to treat
+    under_review=True as provisional, but nothing previously checked that
+    in code. A non-compliant/hallucinating model returning SUPPRESS for a
+    pattern currently under audit sailed through untouched — exactly the
+    burst-replay race under_review exists to close, just closed by
+    convention instead of code. classify_alert() must now force UNCERTAIN
+    regardless of what the model says.
+    """
+
+    async def test_suppress_overridden_to_uncertain_when_under_review(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances
+    ):
+        await _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances)
+        identity_key = ("SharePoint_ToolPane_Rule", "w3wp.exe", "csc.exe", "ToolPane_admin")
+        mark_under_review(identity_key, fake_firestore)
+
+        fake_model_response = {
+            "decision": "SUPPRESS",  # non-compliant: model ignored under_review
+            "matched_pattern_id": "test",
+            "uncertain_reason": "not_applicable",
+            "structural_deviations_found": [],
+            "reasoning": "Matches template.",
+            "confidence_used": 0.9,
+        }
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(return_value=fake_model_response),
+        ):
+            result, _identity_key = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "UNCERTAIN"
+        assert result.uncertain_reason == "under_review"
+        assert "under active audit" in result.reasoning.lower()
+
+    async def test_escalate_while_under_review_left_untouched(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances
+    ):
+        """under_review only blocks SUPPRESS — it's not a blanket override
+        of every decision. A model that already says ESCALATE needs no
+        correction."""
+        await _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances)
+        identity_key = ("SharePoint_ToolPane_Rule", "w3wp.exe", "csc.exe", "ToolPane_admin")
+        mark_under_review(identity_key, fake_firestore)
+
+        fake_model_response = {
+            "decision": "ESCALATE",
+            "matched_pattern_id": "test",
+            "uncertain_reason": "not_applicable",
+            "structural_deviations_found": [],
+            "reasoning": "Escalating out of caution.",
+            "confidence_used": None,
+        }
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(return_value=fake_model_response),
+        ):
+            result, _identity_key = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "ESCALATE"
+        assert "under_review" not in result.reasoning.lower()
 
 
 @pytest.mark.asyncio
