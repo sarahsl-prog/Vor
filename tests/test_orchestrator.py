@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from vor_agents.enrichment import record_confirmed_negative
-from vor_agents.orchestrator import classify_alert
+from vor_agents.orchestrator import classify_alert, run_scheduled_sweep
 
 
 async def _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances):
@@ -226,3 +226,99 @@ class TestSessionUniqueness:
         first_session_id = mock_run_agent.call_args_list[0].kwargs["session_id"]
         second_session_id = mock_run_agent.call_args_list[1].kwargs["session_id"]
         assert first_session_id != second_session_id
+
+
+class TestRunScheduledSweep:
+    """
+    run_scheduled_sweep() no longer awaits audit_pattern() directly --
+    it selects targets (unchanged select_audit_targets() logic) and
+    enqueues one task per target via a dependency-injected callable,
+    same shape as classify_alert() receiving firestore_client rather
+    than constructing one. Not async: enqueueing is a synchronous Cloud
+    Tasks client call, same as the existing synchronous Firestore calls
+    already used inside async FastAPI handlers elsewhere in this repo.
+    """
+
+    def test_enqueues_each_selected_target_and_returns_their_identity_keys(
+        self, fake_firestore
+    ):
+        # Use instances with identity_key components that don't have
+        # underscores, avoiding the known gap (test_known_gaps.py) where
+        # doc.id.split("_") breaks when components contain underscores.
+        # The fix for that gap is out of scope for this task.
+        # Vary host, user, and timestamp to meet evidence_diversity_score threshold.
+        instances = [
+            {
+                "detection_rule_id": "TestRule",
+                "parent_image": "parentexe",
+                "child_image": "childexe",
+                "endpoint_family": "testfamily",
+                "auth_method_present": True,
+                "session_cookie_present": True,
+                "integrity_level": "Medium",
+                "file_access_mode": "read",
+                "egress_follows_access": False,
+                "host": "host1",
+                "user": "user1",
+                "timestamp": "2026-08-01T09:00:00Z",
+                "instance_id": "i1",
+            },
+            {
+                "detection_rule_id": "TestRule",
+                "parent_image": "parentexe",
+                "child_image": "childexe",
+                "endpoint_family": "testfamily",
+                "auth_method_present": True,
+                "session_cookie_present": True,
+                "integrity_level": "Medium",
+                "file_access_mode": "read",
+                "egress_follows_access": False,
+                "host": "host2",
+                "user": "user2",
+                "timestamp": "2026-08-03T14:00:00Z",
+                "instance_id": "i2",
+            },
+            {
+                "detection_rule_id": "TestRule",
+                "parent_image": "parentexe",
+                "child_image": "childexe",
+                "endpoint_family": "testfamily",
+                "auth_method_present": True,
+                "session_cookie_present": True,
+                "integrity_level": "Medium",
+                "file_access_mode": "read",
+                "egress_follows_access": False,
+                "host": "host3",
+                "user": "user3",
+                "timestamp": "2026-08-05T22:00:00Z",
+                "instance_id": "i3",
+            },
+        ]
+        for instance in instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        enqueued_calls = []
+
+        def fake_enqueue(identity_key, pattern_data):
+            enqueued_calls.append(identity_key)
+            return True
+
+        result = run_scheduled_sweep(fake_firestore, fake_enqueue)
+
+        expected_key = ("TestRule", "parentexe", "childexe", "testfamily")
+        assert result == [expected_key]
+        assert enqueued_calls == [expected_key]
+
+    def test_dedup_hits_are_not_counted_in_the_returned_list(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        result = run_scheduled_sweep(fake_firestore, lambda identity_key, pattern_data: False)
+
+        assert result == []
+
+    def test_no_confirmed_patterns_enqueues_nothing(self, fake_firestore):
+        result = run_scheduled_sweep(fake_firestore, lambda identity_key, pattern_data: True)
+        assert result == []
