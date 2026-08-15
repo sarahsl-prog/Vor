@@ -94,6 +94,17 @@ def record_confirmed_negative(
     collection shouldn't share a function, so the "does this alert change
     trust" question is never accidentally answered by the same code path
     that's just checking current trust.
+
+    human_confirmed distinguishes a real per-alert human sign-off from a
+    caller confirming on the pattern's behalf without one (e.g. a bulk
+    "confirm everything matching this template" tool). Previously accepted
+    but silently discarded — every instance looked identically trusted no
+    matter how it was confirmed, which is exactly the "absence of
+    complaint is not confirmation" gap the auditor prompt already warns
+    about for unverified instances. Tagged per-instance (verified_by, not
+    a doc-level field) because confirmed_instances accumulates across many
+    calls to this function — a doc-level field would only ever reflect the
+    most recent call and silently mislabel every earlier instance.
     """
     identity_key = pattern_identity_key(alert)
     doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(
@@ -109,7 +120,11 @@ def record_confirmed_negative(
     # new one — found via testing: this function previously always
     # overwrote instance_id, which silently discarded IDs a caller had
     # already assigned.
-    instances.append({**alert, "instance_id": alert.get("instance_id", str(uuid.uuid4()))})
+    instances.append({
+        **alert,
+        "instance_id": alert.get("instance_id", str(uuid.uuid4())),
+        "verified_by": "human" if human_confirmed else "bulk",
+    })
 
     template = build_structural_template(instances, provenance="live")
     doc_ref.set(
@@ -142,9 +157,18 @@ def seed_template(
     Can enter directly at "confirmed" tier if the seed batch already meets
     GRADUATION_THRESHOLD — that's the entire point of pre-seeding instead
     of waiting on live graduation one alert at a time.
+
+    verified_by is "bulk" for every instance here, same as
+    record_confirmed_negative(human_confirmed=False) — no per-alert human
+    signed off on any of these individually, regardless of how trustworthy
+    the source dataset is.
     """
     seeded_instances = [
-        {**instance, "instance_id": instance.get("instance_id", str(uuid.uuid4()))}
+        {
+            **instance,
+            "instance_id": instance.get("instance_id", str(uuid.uuid4())),
+            "verified_by": "bulk",
+        }
         for instance in confirmed_negative_instances
     ]
     template = build_structural_template(seeded_instances, provenance="seeded")
