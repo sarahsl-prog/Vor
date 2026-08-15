@@ -103,10 +103,20 @@ def test_classify_returns_result_even_if_enqueue_fails(fake_firestore, monkeypat
     assert resp.json()["decision"] == "SUPPRESS"
 
 
-def test_classify_returns_result_even_if_task_env_var_missing(fake_firestore, monkeypatch):
+def test_classify_returns_result_even_if_task_env_var_missing(
+    fake_firestore, fake_tasks_client, monkeypatch
+):
     """_enqueue() must never raise, even on a deploy misconfiguration —
     a missing env var is not the caller's fault and must not cost them
-    their classification result."""
+    their classification result.
+
+    get_tasks_client is patched with fake_tasks_client, same as every
+    sibling test in this file — otherwise _enqueue's left-to-right
+    argument evaluation constructs a real tasks_v2.CloudTasksClient()
+    first, which performs an ADC lookup and raises DefaultCredentialsError
+    in any environment without ambient GCP credentials (CI, a clean
+    container, a contributor machine), for a reason unrelated to what
+    this test asserts."""
     for key, value in TASK_ENV.items():
         if key != "TASKS_OIDC_SA_EMAIL":
             monkeypatch.setenv(key, value)
@@ -114,6 +124,7 @@ def test_classify_returns_result_even_if_task_env_var_missing(fake_firestore, mo
     identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
 
     with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch("main.get_tasks_client", return_value=fake_tasks_client), \
          patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
         resp = client.post("/classify", json={"detection_rule_id": "rule"})

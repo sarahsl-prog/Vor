@@ -65,10 +65,16 @@ def _audit_url() -> str:
 def _enqueue(identity_key: tuple, pattern_data: dict) -> bool:
     """
     Shared enqueue path for both /classify and /sweep (passed into
-    run_scheduled_sweep as its enqueue_audit_fn). Never raises — an
-    enqueue failure must never fail the caller's own response; it's
-    logged and treated as "not enqueued" (False) so callers can still
-    react to that if they care (today, neither does).
+    run_scheduled_sweep as its enqueue_audit_fn). Absorbs AuditEnqueueError
+    and KeyError (a missing TASK_ENV var) so a bad enqueue or a deploy
+    misconfiguration never fails the caller's own response; it's logged
+    and treated as "not enqueued" (False) so callers can still react to
+    that if they care (today, neither does).
+
+    Not an absolute guarantee: credential errors from get_tasks_client()
+    (e.g. no ADC in the runtime environment) are not caught here, since
+    they signal a broken deployment rather than a per-request condition
+    worth silently swallowing.
     """
     try:
         return enqueue_audit(
