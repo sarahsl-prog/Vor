@@ -52,6 +52,7 @@ class TestRecordConfirmedNegative:
         # the stored doc — verify via a second enrichment call context.
         from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
         from vor_agents.identity import pattern_identity_key
+
         key = pattern_identity_key(baseline_alert)
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
         instances = doc.to_dict()["confirmed_instances"]
@@ -73,17 +74,26 @@ class TestSeedTemplate:
     def test_seeded_instances_get_ids_if_missing(self, fake_firestore):
         key = ("rule", "w3wp.exe", "csc.exe", "family")
         instances_without_ids = [
-            {"detection_rule_id": "rule", "parent_image": "w3wp.exe",
-             "child_image": "csc.exe", "endpoint_family": "family",
-             "auth_method_present": True, "session_cookie_present": True,
-             "integrity_level": "Medium", "file_access_mode": "read",
-             "egress_follows_access": False, "host": f"h{i}", "user": f"u{i}",
-             "timestamp": f"2026-08-0{i}T09:00:00Z"}
+            {
+                "detection_rule_id": "rule",
+                "parent_image": "w3wp.exe",
+                "child_image": "csc.exe",
+                "endpoint_family": "family",
+                "auth_method_present": True,
+                "session_cookie_present": True,
+                "integrity_level": "Medium",
+                "file_access_mode": "read",
+                "egress_follows_access": False,
+                "host": f"h{i}",
+                "user": f"u{i}",
+                "timestamp": f"2026-08-0{i}T09:00:00Z",
+            }
             for i in range(1, 6)
         ]
         seed_template(key, instances_without_ids, fake_firestore)
 
         from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
         stored = doc.to_dict()["confirmed_instances"]
         assert all("instance_id" in inst and inst["instance_id"] for inst in stored)

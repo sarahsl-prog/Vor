@@ -18,8 +18,9 @@ def select_audit_targets(all_suppressed_patterns: list[dict], max_targets: int =
     Each input pattern dict is expected to have these three numeric fields
     plus an "identity_key" tuple/string for downstream lookup.
     """
+
     def priority(pattern: dict) -> float:
-        return (
+        return float(
             pattern["days_since_last_review"] * 1.0
             + (1.0 - pattern["evidence_diversity_score"]) * 2.0
             + pattern["blast_radius_estimate"] * 3.0

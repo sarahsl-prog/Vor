@@ -40,7 +40,7 @@ def _task_name(queue_path: str, identity_key: tuple) -> str:
     components (rule IDs, process names) aren't guaranteed to fit either
     constraint.
     """
-    key_hash = hashlib.sha1("_".join(identity_key).encode()).hexdigest()
+    key_hash = hashlib.sha1("_".join(identity_key).encode(), usedforsecurity=False).hexdigest()
     return f"{queue_path}/tasks/audit-{key_hash}"
 
 
@@ -91,8 +91,6 @@ def enqueue_audit(
         logger.bind(identity_key=identity_key, task_name=task_name, error=str(exc)).error(
             "Failed to enqueue audit task"
         )
-        raise AuditEnqueueError(
-            f"Failed to enqueue audit for {identity_key}: {exc}"
-        ) from exc
+        raise AuditEnqueueError(f"Failed to enqueue audit for {identity_key}: {exc}") from exc
 
     return True

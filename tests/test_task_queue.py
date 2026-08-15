@@ -30,42 +30,67 @@ class TestTaskName:
 class TestEnqueueAudit:
     def test_new_task_returns_true_and_is_recorded(self, fake_tasks_client):
         result = enqueue_audit(
-            IDENTITY_KEY, {"triggered_by": "test"}, fake_tasks_client,
-            QUEUE_PATH, AUDIT_URL, OIDC_SA,
+            IDENTITY_KEY,
+            {"triggered_by": "test"},
+            fake_tasks_client,
+            QUEUE_PATH,
+            AUDIT_URL,
+            OIDC_SA,
         )
         assert result is True
         assert len(fake_tasks_client.created_tasks) == 1
 
     def test_duplicate_identity_key_returns_false_without_a_second_task(self, fake_tasks_client):
         enqueue_audit(
-            IDENTITY_KEY, {"triggered_by": "test"}, fake_tasks_client,
-            QUEUE_PATH, AUDIT_URL, OIDC_SA,
+            IDENTITY_KEY,
+            {"triggered_by": "test"},
+            fake_tasks_client,
+            QUEUE_PATH,
+            AUDIT_URL,
+            OIDC_SA,
         )
         result = enqueue_audit(
-            IDENTITY_KEY, {"triggered_by": "test"}, fake_tasks_client,
-            QUEUE_PATH, AUDIT_URL, OIDC_SA,
+            IDENTITY_KEY,
+            {"triggered_by": "test"},
+            fake_tasks_client,
+            QUEUE_PATH,
+            AUDIT_URL,
+            OIDC_SA,
         )
         assert result is False
         assert len(fake_tasks_client.created_tasks) == 1
 
     def test_different_pattern_gets_its_own_task(self, fake_tasks_client):
         enqueue_audit(
-            IDENTITY_KEY, {"triggered_by": "test"}, fake_tasks_client,
-            QUEUE_PATH, AUDIT_URL, OIDC_SA,
+            IDENTITY_KEY,
+            {"triggered_by": "test"},
+            fake_tasks_client,
+            QUEUE_PATH,
+            AUDIT_URL,
+            OIDC_SA,
         )
         enqueue_audit(
-            OTHER_IDENTITY_KEY, {"triggered_by": "test"}, fake_tasks_client,
-            QUEUE_PATH, AUDIT_URL, OIDC_SA,
+            OTHER_IDENTITY_KEY,
+            {"triggered_by": "test"},
+            fake_tasks_client,
+            QUEUE_PATH,
+            AUDIT_URL,
+            OIDC_SA,
         )
         assert len(fake_tasks_client.created_tasks) == 2
 
     def test_non_dedup_client_errors_are_wrapped(self, fake_tasks_client):
         def _boom(parent, task):
             raise RuntimeError("quota exceeded")
+
         fake_tasks_client.create_task = _boom
 
         with pytest.raises(AuditEnqueueError):
             enqueue_audit(
-                IDENTITY_KEY, {"triggered_by": "test"}, fake_tasks_client,
-                QUEUE_PATH, AUDIT_URL, OIDC_SA,
+                IDENTITY_KEY,
+                {"triggered_by": "test"},
+                fake_tasks_client,
+                QUEUE_PATH,
+                AUDIT_URL,
+                OIDC_SA,
             )

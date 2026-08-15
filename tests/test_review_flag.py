@@ -46,10 +46,14 @@ def test_clear_under_review_downgrade_invalidates_cited_instances(
     key = _setup_confirmed_pattern(fake_firestore, diverse_confirmed_instances)
     mark_under_review(key, fake_firestore)
 
-    clear_under_review(key, fake_firestore, {
-        "action": "DOWNGRADE",
-        "invalidated_instance_ids": ["i1"],
-    })
+    clear_under_review(
+        key,
+        fake_firestore,
+        {
+            "action": "DOWNGRADE",
+            "invalidated_instance_ids": ["i1"],
+        },
+    )
 
     doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
     data = doc.to_dict()

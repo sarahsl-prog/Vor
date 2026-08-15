@@ -3,3 +3,6 @@ pytest-asyncio
 pytest-mock
 ruff
 httpx
+black
+mypy
+bandit

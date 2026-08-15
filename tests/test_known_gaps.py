@@ -22,7 +22,10 @@ from vor_agents.enrichment import _doc_id
 )
 def test_identity_key_roundtrip_survives_underscore_in_component():
     key_with_underscore = (
-        "Sigma_Rule_With_Underscores", "w3wp.exe", "csc.exe", "ToolPane_admin",
+        "Sigma_Rule_With_Underscores",
+        "w3wp.exe",
+        "csc.exe",
+        "ToolPane_admin",
     )
     doc_id = _doc_id(key_with_underscore)
     reconstructed = tuple(doc_id.split("_"))

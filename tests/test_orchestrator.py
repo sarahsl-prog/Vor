@@ -78,7 +78,6 @@ class TestReconciliation:
         assert "override" in result.reasoning.lower()
         assert len(result.structural_deviations_found) >= 5
 
-
     async def test_model_more_cautious_than_ground_truth_not_touched(
         self, fake_firestore, baseline_alert, diverse_confirmed_instances
     ):
@@ -104,9 +103,7 @@ class TestReconciliation:
         assert result.decision == "ESCALATE"
         assert "override" not in result.reasoning.lower()
 
-    async def test_no_history_skips_reconciliation_entirely(
-        self, fake_firestore, baseline_alert
-    ):
+    async def test_no_history_skips_reconciliation_entirely(self, fake_firestore, baseline_alert):
         """No confirmed template exists yet -> precomputed_deviations is
         empty -> reconciliation block should not run at all (guarded by
         'if precomputed_deviations:'). Model's UNCERTAIN stands untouched."""
@@ -239,9 +236,7 @@ class TestRunScheduledSweep:
     already used inside async FastAPI handlers elsewhere in this repo.
     """
 
-    def test_enqueues_each_selected_target_and_returns_their_identity_keys(
-        self, fake_firestore
-    ):
+    def test_enqueues_each_selected_target_and_returns_their_identity_keys(self, fake_firestore):
         # Use instances with identity_key components that don't have
         # underscores, avoiding the known gap (test_known_gaps.py) where
         # doc.id.split("_") breaks when components contain underscores.

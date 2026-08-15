@@ -35,7 +35,7 @@ _firestore_client = None
 _tasks_client = None
 
 
-def get_firestore_client():
+def get_firestore_client() -> firestore.Client:
     # Lazy singleton — avoids paying Firestore client init cost on every
     # cold start path that doesn't need it (e.g. /healthz).
     global _firestore_client
@@ -44,7 +44,7 @@ def get_firestore_client():
     return _firestore_client
 
 
-def get_tasks_client():
+def get_tasks_client() -> tasks_v2.CloudTasksClient:
     # Lazy singleton, same shape as get_firestore_client().
     global _tasks_client
     if _tasks_client is None:
@@ -53,8 +53,10 @@ def get_tasks_client():
 
 
 def _queue_path() -> str:
-    return get_tasks_client().queue_path(
-        os.environ["GCP_PROJECT"], os.environ["TASKS_LOCATION"], os.environ["TASKS_QUEUE"]
+    return str(
+        get_tasks_client().queue_path(
+            os.environ["GCP_PROJECT"], os.environ["TASKS_LOCATION"], os.environ["TASKS_QUEUE"]
+        )
     )
 
 

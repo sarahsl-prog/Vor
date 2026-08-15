@@ -7,7 +7,7 @@ auditor_agent.py) with no orchestration logic of its own.
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -24,8 +24,8 @@ from .review_flag import clear_under_review, mark_under_review
 from .schemas import AuditorOutput, ClassifierOutput
 
 session_service = InMemorySessionService()  # swap for a persistent
-                                             # SessionService in production;
-                                             # fine for a hackathon demo
+# SessionService in production;
+# fine for a hackathon demo
 
 
 async def _run_agent(agent, prompt_text: str, session_id: str) -> dict:
@@ -43,9 +43,11 @@ async def _run_agent(agent, prompt_text: str, session_id: str) -> dict:
     ):
         if event.content and event.content.parts:
             for part in event.content.parts:
-                if getattr(part, "text", None):
-                    result_text += part.text
-    return json.loads(result_text)
+                text = getattr(part, "text", None)
+                if text is not None:
+                    result_text += text
+    parsed: dict = json.loads(result_text)
+    return parsed
 
 
 def _deviation_field_names(deviation_strings: list[str]) -> set[str]:
@@ -97,9 +99,7 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
 
     precomputed_deviations = []
     if enrichment["status"] == "TEMPLATE":
-        precomputed_deviations = diff_alert_against_template(
-            alert, enrichment["fields"]
-        )
+        precomputed_deviations = diff_alert_against_template(alert, enrichment["fields"])
 
     prompt = (
         f"Alert:\n{json.dumps(alert, indent=2)}\n\n"
@@ -133,18 +133,21 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
             # to reconsider (same "when in doubt, force the safe outcome
             # in code, not via another LLM call" principle used for
             # NO_HISTORY and under_review elsewhere in this design).
-            classifier_output = classifier_output.model_copy(update={
-                "decision": "ESCALATE",
-                "structural_deviations_found": sorted(
-                    set(classifier_output.structural_deviations_found) | set(precomputed_deviations)
-                ),
-                "reasoning": (
-                    classifier_output.reasoning
-                    + f" [Vör correctness override: deterministic diff found "
-                    f"deviation(s) in {sorted(missed_by_model)} that the model "
-                    f"did not report or act on; SUPPRESS overridden to ESCALATE.]"
-                ),
-            })
+            classifier_output = classifier_output.model_copy(
+                update={
+                    "decision": "ESCALATE",
+                    "structural_deviations_found": sorted(
+                        set(classifier_output.structural_deviations_found)
+                        | set(precomputed_deviations)
+                    ),
+                    "reasoning": (
+                        classifier_output.reasoning
+                        + f" [Vör correctness override: deterministic diff found "
+                        f"deviation(s) in {sorted(missed_by_model)} that the model "
+                        f"did not report or act on; SUPPRESS overridden to ESCALATE.]"
+                    ),
+                }
+            )
         # The reverse case (model reported a deviation ground truth didn't
         # find) is deliberately NOT overridden — the model being more
         # cautious than the deterministic check is the safe direction and
@@ -162,23 +165,23 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
         # safe outcome in code" principle as the check above — a model
         # contradicting its own stated rule can't be trusted regardless of
         # what ground truth separately found.
-        classifier_output = classifier_output.model_copy(update={
-            "decision": "ESCALATE",
-            "reasoning": (
-                classifier_output.reasoning
-                + " [Vör correctness override: model reported structural "
-                "deviation(s) but decision was SUPPRESS, contradicting its "
-                "own classification rule that any deviation forces "
-                "ESCALATE; overridden to ESCALATE.]"
-            ),
-        })
+        classifier_output = classifier_output.model_copy(
+            update={
+                "decision": "ESCALATE",
+                "reasoning": (
+                    classifier_output.reasoning
+                    + " [Vör correctness override: model reported structural "
+                    "deviation(s) but decision was SUPPRESS, contradicting its "
+                    "own classification rule that any deviation forces "
+                    "ESCALATE; overridden to ESCALATE.]"
+                ),
+            }
+        )
 
     return classifier_output, identity_key
 
 
-async def audit_pattern(
-    identity_key: tuple, pattern_data: dict, firestore_client
-) -> AuditorOutput:
+async def audit_pattern(identity_key: tuple, pattern_data: dict, firestore_client) -> AuditorOutput:
     """
     Full audit path for one flagged pattern:
       1. mark_under_review() — synchronous, BEFORE any LLM call, closes
@@ -193,9 +196,7 @@ async def audit_pattern(
     # only pass summary fields (days_since_last_review, blast_radius, etc.)
     # from select_audit_targets(), and the auditor prompt now depends on
     # seeing every instance_id to be able to cite one.
-    doc = firestore_client.collection(CONFIDENCE_COLLECTION).document(
-        _doc_id(identity_key)
-    ).get()
+    doc = firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
     confirmed_instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
 
     prompt = (
@@ -217,9 +218,7 @@ async def audit_pattern(
     return decision
 
 
-def run_scheduled_sweep(
-    firestore_client, enqueue_audit_fn, max_targets: int = 10
-) -> list[tuple]:
+def run_scheduled_sweep(firestore_client, enqueue_audit_fn, max_targets: int = 10) -> list[tuple]:
     """
     Safety-net path — invoked on a timer (e.g. weekly Cloud Scheduler job
     hitting a Cloud Run endpoint that calls this function). Reuses the
@@ -272,9 +271,9 @@ def _fetch_all_suppressed_patterns(firestore_client) -> list[dict]:
     risk of a cached score surviving past an invalidate_instances() call
     that changed the underlying evidence.
     """
-    docs = firestore_client.collection(CONFIDENCE_COLLECTION).where(
-        "tier", "==", "confirmed"
-    ).stream()
+    docs = (
+        firestore_client.collection(CONFIDENCE_COLLECTION).where("tier", "==", "confirmed").stream()
+    )
 
     patterns = []
     for doc in docs:
@@ -286,21 +285,23 @@ def _fetch_all_suppressed_patterns(firestore_client) -> list[dict]:
         last_reviewed_at = data.get("last_reviewed_at")
         if last_reviewed_at:
             reviewed_dt = datetime.fromisoformat(last_reviewed_at)
-            days_since = (datetime.now(timezone.utc) - reviewed_dt).days
+            days_since = (datetime.now(UTC) - reviewed_dt).days
         else:
             days_since = 9999  # never audited — treat as maximally stale
 
-        patterns.append({
-            "identity_key": tuple(doc.id.split("_")),
-            "days_since_last_review": days_since,
-            "evidence_diversity_score": evidence_diversity_score(instances),
-            # Worst case across ALL instances, not just the first —
-            # different confirmed instances of the same pattern can carry
-            # different indicator values (e.g. different hosts with
-            # different privilege contexts), and blast radius is
-            # deliberately a worst-case estimate throughout this design.
-            "blast_radius_estimate": max(
-                estimate_blast_radius(instance) for instance in instances
-            ),
-        })
+        patterns.append(
+            {
+                "identity_key": tuple(doc.id.split("_")),
+                "days_since_last_review": days_since,
+                "evidence_diversity_score": evidence_diversity_score(instances),
+                # Worst case across ALL instances, not just the first —
+                # different confirmed instances of the same pattern can carry
+                # different indicator values (e.g. different hosts with
+                # different privilege contexts), and blast radius is
+                # deliberately a worst-case estimate throughout this design.
+                "blast_radius_estimate": max(
+                    estimate_blast_radius(instance) for instance in instances
+                ),
+            }
+        )
     return patterns
