@@ -87,8 +87,26 @@ def _deviation_field_names(deviation_strings: list[str]) -> set[str]:
     template/observed values identically to the Python-computed version
     (repr formatting, quoting, etc.) — field name is the part that actually
     matters for reconciliation, not incidental text differences.
+
+    A string with no colon (the model not following the format at all,
+    e.g. "integrity_level observed High instead of Medium") previously got
+    treated as a whole-string field name, which can't match a real
+    template field and would never be found equal to anything on either
+    side of the reconciliation diff in classify_alert(). That's silently
+    fragile in the dangerous direction: it can make a real deviation look
+    unreported ("missed_by_model") when the model actually did report it,
+    just not in the expected format — skip and log instead of guessing.
     """
-    return {d.split(":", 1)[0].strip() for d in deviation_strings if d}
+    parsed = set()
+    for d in deviation_strings:
+        d = d.strip()
+        if not d:
+            continue
+        if ":" not in d:
+            logger.warning("Deviation string missing expected 'field:' prefix: {}", d)
+            continue
+        parsed.add(d.split(":", 1)[0].strip())
+    return parsed
 
 
 async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutput, tuple]:
