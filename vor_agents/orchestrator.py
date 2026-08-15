@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
+from loguru import logger
 
 from .audit_targets import select_audit_targets
 from .auditor_agent import build_auditor_agent
@@ -21,7 +22,7 @@ from .enrichment import CONFIDENCE_COLLECTION, _doc_id, enrich
 from .evidence_diversity import evidence_diversity_score
 from .identity import diff_alert_against_template
 from .review_flag import clear_under_review, mark_under_review
-from .schemas import AuditorOutput, ClassifierOutput
+from .schemas import AuditorAction, AuditorOutput, ClassifierOutput
 
 session_service = InMemorySessionService()  # swap for a persistent
                                              # SessionService in production;
@@ -184,36 +185,58 @@ async def audit_pattern(
       1. mark_under_review() — synchronous, BEFORE any LLM call, closes
          the burst-replay race window immediately
       2. Auditor agent call, separate context from the classifier
-      3. clear_under_review() atomically with the recorded decision
+      3. clear_under_review() atomically with the recorded decision,
+         ALWAYS — even if the auditor call itself failed (see except
+         below). Leaving under_review=True on failure would permanently
+         block autonomous suppression for this pattern until someone
+         manually clears the flag in Firestore; a failed audit degrading
+         to "reviewed, no action, try again next sweep" is the same
+         "force a safe outcome in code" principle used everywhere else in
+         this design, not a special case.
     """
     mark_under_review(identity_key, firestore_client)
 
-    # Fetch the full confirmed_instances list directly rather than trusting
-    # pattern_data to already contain it — callers like run_scheduled_sweep
-    # only pass summary fields (days_since_last_review, blast_radius, etc.)
-    # from select_audit_targets(), and the auditor prompt now depends on
-    # seeing every instance_id to be able to cite one.
-    doc = firestore_client.collection(CONFIDENCE_COLLECTION).document(
-        _doc_id(identity_key)
-    ).get()
-    confirmed_instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
+    try:
+        # Fetch the full confirmed_instances list directly rather than
+        # trusting pattern_data to already contain it — callers like
+        # run_scheduled_sweep only pass summary fields
+        # (days_since_last_review, blast_radius, etc.) from
+        # select_audit_targets(), and the auditor prompt now depends on
+        # seeing every instance_id to be able to cite one.
+        doc = firestore_client.collection(CONFIDENCE_COLLECTION).document(
+            _doc_id(identity_key)
+        ).get()
+        confirmed_instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
 
-    prompt = (
-        f"Pattern under review:\n{json.dumps(pattern_data, indent=2)}\n\n"
-        f"Confirmed instances (cite instance_id values from this list only "
-        f"if downgrading):\n{json.dumps(confirmed_instances, indent=2)}\n\n"
-        "Review this suppression decision per your instructions."
-    )
-    auditor = build_auditor_agent()
-    # Same unique-session-per-call rationale as classify_alert() above —
-    # each audit is a fresh, independent review, not a continuation of a
-    # prior one for this pattern.
-    result = await _run_agent(
-        auditor, prompt, session_id=f"audit_{'_'.join(identity_key)}_{uuid.uuid4()}"
-    )
-    decision = AuditorOutput.model_validate(result)
+        prompt = (
+            f"Pattern under review:\n{json.dumps(pattern_data, indent=2)}\n\n"
+            f"Confirmed instances (cite instance_id values from this list only "
+            f"if downgrading):\n{json.dumps(confirmed_instances, indent=2)}\n\n"
+            "Review this suppression decision per your instructions."
+        )
+        auditor = build_auditor_agent()
+        # Same unique-session-per-call rationale as classify_alert() above —
+        # each audit is a fresh, independent review, not a continuation of a
+        # prior one for this pattern.
+        result = await _run_agent(
+            auditor, prompt, session_id=f"audit_{'_'.join(identity_key)}_{uuid.uuid4()}"
+        )
+        decision = AuditorOutput.model_validate(result)
+    except Exception as exc:  # noqa: BLE001 — deliberately catch-all: any
+        # failure in this block (Firestore unavailable, model call failed,
+        # malformed JSON, invalid enum value) previously left
+        # under_review=True forever. Degrade to a no-op decision instead:
+        # the pattern is still reachable by the next sweep/classify-
+        # triggered audit, and the failure is visible in the decision's
+        # own reasoning text rather than silently swallowed.
+        logger.bind(identity_key=identity_key).exception("Audit failed")
+        decision = AuditorOutput(
+            action=AuditorAction.NO_ACTION,
+            reasoning=f"Audit failed with error: {exc!r}",
+        )
+    finally:
+        clear_under_review(identity_key, firestore_client, decision.model_dump())
 
-    clear_under_review(identity_key, firestore_client, decision.model_dump())
     return decision
 
 

@@ -16,8 +16,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from vor_agents.enrichment import record_confirmed_negative
-from vor_agents.orchestrator import classify_alert, run_scheduled_sweep
+from vor_agents.enrichment import (
+    CONFIDENCE_COLLECTION,
+    _doc_id,
+    record_confirmed_negative,
+)
+from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
 
 
 async def _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances):
@@ -226,6 +230,61 @@ class TestSessionUniqueness:
         first_session_id = mock_run_agent.call_args_list[0].kwargs["session_id"]
         second_session_id = mock_run_agent.call_args_list[1].kwargs["session_id"]
         assert first_session_id != second_session_id
+
+
+@pytest.mark.asyncio
+class TestAuditPatternFailureHandling:
+    """
+    Regression coverage for the stuck-under_review bug: a failed audit
+    (model exception, malformed output, Firestore hiccup) previously left
+    under_review=True forever, since clear_under_review() only ran after
+    a successful model call. audit_pattern() must now clear the flag on
+    ANY outcome, success or failure.
+    """
+
+    async def test_run_agent_exception_clears_under_review_and_stamps_review_time(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        identity_key = ("TestRule", "parent.exe", "child.exe", "testfamily")
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(side_effect=RuntimeError("model unavailable")),
+        ):
+            decision = await audit_pattern(identity_key, {}, fake_firestore)
+
+        assert decision.action == "NO_ACTION"
+        assert "model unavailable" in decision.reasoning
+
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(
+            _doc_id(identity_key)
+        ).get()
+        data = doc.to_dict()
+        assert data["under_review"] is False
+        assert data["last_reviewed_at"] is not None
+
+    async def test_invalid_model_output_clears_under_review(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        identity_key = ("TestRule", "parent.exe", "child.exe", "testfamily")
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(return_value={"action": "NOT_A_REAL_ACTION"}),
+        ):
+            decision = await audit_pattern(identity_key, {}, fake_firestore)
+
+        assert decision.action == "NO_ACTION"
+        assert "NOT_A_REAL_ACTION" in decision.reasoning or "action" in decision.reasoning
+
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(
+            _doc_id(identity_key)
+        ).get()
+        assert doc.to_dict()["under_review"] is False
 
 
 class TestRunScheduledSweep:
