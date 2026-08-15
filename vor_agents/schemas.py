@@ -10,7 +10,7 @@ contract (JSON schema for documentation/reference, Pydantic for runtime).
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Decision(str, Enum):
@@ -44,6 +44,30 @@ class ClassifierOutput(BaseModel):
     )
     reasoning: str
     confidence_used: float | None = None
+
+
+class ClassifierRequest(BaseModel):
+    """Body shape for POST /classify. Only the four identity_key
+    components (see identity.pattern_identity_key) are required —
+    pattern_identity_key() indexes an alert dict directly (alert["field"])
+    rather than using .get(), so a missing one previously raised a raw
+    KeyError that surfaced as an unhandled 500. Validating here turns that
+    into a clear 422 instead, same "never surface raw exceptions" standard
+    as AuditRequest below.
+
+    Every other field (DIFFABLE_FIELDS, host/user/timestamp, instance_id)
+    is optional and read with .get() throughout the codebase, so nothing
+    breaks if they're absent — extra="allow" lets an alert schema carry
+    additional context fields this model doesn't know about by name
+    without stripping them, since classify_alert() and everything
+    downstream operate on a plain dict, not this model's fields."""
+
+    model_config = ConfigDict(extra="allow")
+
+    detection_rule_id: str
+    parent_image: str
+    child_image: str
+    endpoint_family: str
 
 
 class AuditRequest(BaseModel):
