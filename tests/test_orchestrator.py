@@ -21,7 +21,13 @@ from vor_agents.enrichment import (
     _doc_id,
     record_confirmed_negative,
 )
-from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
+from vor_agents.orchestrator import (
+    AgentOutputError,
+    _run_agent,
+    audit_pattern,
+    classify_alert,
+    run_scheduled_sweep,
+)
 
 
 async def _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances):
@@ -285,6 +291,67 @@ class TestAuditPatternFailureHandling:
             _doc_id(identity_key)
         ).get()
         assert doc.to_dict()["under_review"] is False
+
+
+class _FakePart:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeContent:
+    def __init__(self, parts):
+        self.parts = parts
+
+
+class _FakeEvent:
+    def __init__(self, text):
+        self.content = _FakeContent([_FakePart(text)])
+
+
+class _FakeRunner:
+    """Stand-in for google.adk.runners.Runner — yields one event carrying
+    whatever raw text the test wants _run_agent to try to json.loads()."""
+
+    def __init__(self, *, response_text, **kwargs):
+        self._response_text = response_text
+
+    async def run_async(self, *, user_id, session_id, new_message):
+        yield _FakeEvent(self._response_text)
+
+
+@pytest.mark.asyncio
+class TestRunAgentJSONParsing:
+    """
+    Regression coverage for _run_agent()'s unwrapped json.loads(): a model
+    returning empty output, Markdown-fenced JSON, or truncated text
+    previously raised a bare json.JSONDecodeError straight out of
+    _run_agent, propagating to a 500 on /classify or (before the Task 1
+    fix) a permanently stuck under_review flag on /audit.
+    """
+
+    async def test_run_agent_bad_json_raises_agent_output_error(self):
+        with (
+            patch(
+                "vor_agents.orchestrator.Runner",
+                side_effect=lambda **kwargs: _FakeRunner(response_text="not json at all", **kwargs),
+            ),
+            pytest.raises(AgentOutputError),
+        ):
+            await _run_agent(agent=object(), prompt_text="prompt", session_id="s1")
+
+    async def test_classify_alert_degrades_to_uncertain_on_unparseable_output(
+        self, fake_firestore, baseline_alert
+    ):
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(side_effect=AgentOutputError("Model did not return valid JSON")),
+        ):
+            result, identity_key = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "UNCERTAIN"
+        assert result.uncertain_reason == "missing_data"
+        assert "unparseable" in result.reasoning.lower()
+        assert identity_key  # still returns a real identity_key, not lost
 
 
 class TestRunScheduledSweep:
