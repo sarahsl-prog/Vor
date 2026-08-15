@@ -411,7 +411,16 @@ def _fetch_all_suppressed_patterns(firestore_client) -> list[dict]:
         last_reviewed_at = data.get("last_reviewed_at")
         if last_reviewed_at:
             reviewed_dt = datetime.fromisoformat(last_reviewed_at)
-            days_since = (datetime.now(timezone.utc) - reviewed_dt).days
+            # Clamped to >= 0: a last_reviewed_at in the future (clock
+            # skew between whatever wrote it and this read) would
+            # otherwise go negative and make select_audit_targets() rank
+            # this pattern BELOW patterns that are genuinely never-
+            # audited — the opposite of what "needs review" should mean.
+            # select_audit_targets() clamps too (defense in depth for
+            # direct callers of that function), but the sentinel-value
+            # comment below only makes sense if this is never negative to
+            # begin with.
+            days_since = max((datetime.now(timezone.utc) - reviewed_dt).days, 0)
         else:
             days_since = 9999  # never audited — treat as maximally stale
 

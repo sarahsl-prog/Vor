@@ -43,3 +43,35 @@ def test_max_targets_respected():
 
 def test_empty_input_returns_empty():
     assert select_audit_targets([]) == []
+
+
+def test_negative_days_since_review_clamped_not_penalized():
+    """Regression coverage: a negative days_since_last_review (clock
+    skew — last_reviewed_at in the future relative to whatever computed
+    it) must not rank a pattern BELOW one that's never been audited at
+    all. Clamped to 0, not left negative, so the skewed pattern is at
+    worst treated as freshly-reviewed, never as lower-priority than
+    genuinely-stale evidence."""
+    patterns = [
+        _pattern(days=-5, diversity=1.0, blast_radius=0.5, key="clock_skewed"),
+        _pattern(days=0, diversity=1.0, blast_radius=0.5, key="freshly_reviewed"),
+    ]
+    result = select_audit_targets(patterns)
+    # Both clamp to days_since=0 with identical diversity/blast_radius —
+    # same priority score, tie-broken deterministically below, not a
+    # ranking assertion here.
+    assert {p["identity_key"] for p in result} == {"clock_skewed", "freshly_reviewed"}
+
+
+def test_tied_priority_breaks_deterministically_on_identity_key():
+    """Two patterns with identical days/diversity/blast_radius must
+    still sort in a stable, reproducible order across repeated calls —
+    not left to whatever order they happened to arrive in (Firestore
+    query result order for equal-priority docs isn't guaranteed)."""
+    patterns = [
+        _pattern(days=5, diversity=0.5, blast_radius=0.5, key="zzz_pattern"),
+        _pattern(days=5, diversity=0.5, blast_radius=0.5, key="aaa_pattern"),
+    ]
+    first_call = [p["identity_key"] for p in select_audit_targets(patterns)]
+    second_call = [p["identity_key"] for p in select_audit_targets(list(reversed(patterns)))]
+    assert first_call == second_call
