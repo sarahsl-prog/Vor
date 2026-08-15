@@ -795,6 +795,32 @@ git commit -m "Route /classify, /sweep, and a new /audit endpoint through Cloud 
 
 ---
 
+## Task 4b: `main.py` — close two error-handling gaps found in Task 4 review (added post-plan)
+
+Not part of the original plan — added after Task 4's review surfaced two
+Important findings inherited from this plan's own Step 3 code for
+`main.py`. Full brief: `.superpowers/sdd/2026-08-14-cloud-tasks-audit-queue/task-4b-brief.md`.
+Full detail (fixes, review, and a follow-up patch for a test-hygiene
+defect the review caught) is in `progress.md`'s Task 4b section — summary
+here for plan continuity:
+
+- [x] **Gap 1:** `_enqueue()`'s `except AuditEnqueueError` widened to
+  `except (AuditEnqueueError, KeyError)` — a missing `TASK_ENV` var was
+  escaping uncaught and 500ing `/classify`/`/sweep` on a deploy
+  misconfig, violating CLAUDE.md's "never surface raw exceptions".
+- [x] **Gap 2:** new `AuditRequest` pydantic model (`vor_agents/schemas.py`)
+  validates `/audit`'s body — a malformed payload now returns 422 instead
+  of an unhandled `KeyError`-turned-500 that would otherwise burn Cloud
+  Tasks' full retry budget on a payload that can never succeed.
+- [x] **Follow-up:** the Gap 1 test itself didn't patch `get_tasks_client`,
+  so it required ambient GCP credentials to pass — fixed to match every
+  sibling test; `_enqueue`'s docstring's absolute "Never raises" claim
+  narrowed to state precisely what's absorbed.
+
+Commits: `070eef6`, `ec30f14`. Reviews: `task-4b-review.md`, both rounds Approved.
+
+---
+
 ## Task 5: `docs/DEPLOY.md` — Cloud Tasks deployment steps
 
 **Files:**
