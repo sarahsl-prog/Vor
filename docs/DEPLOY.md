@@ -50,6 +50,49 @@ Runs Monday 3am UTC — low-traffic window, weekly cadence per the hybrid
 cadence design (safety net for patterns the event-triggered path never
 revisits, not meant to be frequent).
 
+## 3a. Create the Cloud Tasks queue and grant enqueue/callback IAM
+
+```bash
+gcloud tasks queues create vor-audit-queue \
+  --location us-central1 \
+  --max-attempts 5 \
+  --min-backoff 10s \
+  --max-backoff 300s
+```
+
+Retry config (5 attempts, 10s-300s exponential backoff) is a starting
+point, not calibrated against real audit failure rates — same posture
+as `GRADUATION_THRESHOLD`/`MIN_DIVERSITY` elsewhere in this project.
+Revisit once real traffic data exists.
+
+The Cloud Run service's own identity needs permission to enqueue tasks:
+
+```bash
+gcloud tasks queues add-iam-policy-binding vor-audit-queue \
+  --location us-central1 \
+  --member "serviceAccount:YOUR_CLOUD_RUN_SERVICE_ACCOUNT" \
+  --role "roles/cloudtasks.enqueuer"
+```
+
+Cloud Tasks calls back into `POST /audit` the same way Cloud Scheduler
+calls `POST /sweep` — reuse the `vor-scheduler` service account created
+in step 2, since it already has `roles/run.invoker` on this service.
+No new service account or binding is needed for the callback itself,
+only for enqueueing (above).
+
+Set the environment variables `/classify`, `/sweep`, and `/audit` all
+need, on the Cloud Run service itself:
+
+```bash
+gcloud run services update vor \
+  --region us-central1 \
+  --set-env-vars "GCP_PROJECT=YOUR_PROJECT_ID,TASKS_LOCATION=us-central1,TASKS_QUEUE=vor-audit-queue,TASKS_OIDC_SA_EMAIL=vor-scheduler@YOUR_PROJECT_ID.iam.gserviceaccount.com,SERVICE_URL=https://YOUR_CLOUD_RUN_URL"
+```
+
+`/audit` must never be deployed with `--allow-unauthenticated`, same as
+`/classify` and `/sweep` — it's reached exclusively via Cloud Tasks'
+OIDC-authenticated dispatch.
+
 ## 4. The `/classify` endpoint itself
 
 `/classify` isn't wired to a trigger source yet — that's genuinely still
