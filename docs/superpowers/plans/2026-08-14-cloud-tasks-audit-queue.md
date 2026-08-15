@@ -829,7 +829,7 @@ Commits: `070eef6`, `ec30f14`. Reviews: `task-4b-review.md`, both rounds Approve
 **Interfaces:**
 - None (documentation only).
 
-- [ ] **Step 1: Insert a new section after step 3 (the weekly sweep job) and before step 4 (`/classify`'s trigger source)**
+- [x] **Step 1: Insert a new section after step 3 (the weekly sweep job) and before step 4 (`/classify`'s trigger source)**
 
 ```markdown
 ## 3a. Create the Cloud Tasks queue and grant enqueue/callback IAM
@@ -876,13 +876,13 @@ gcloud run services update vor \
 OIDC-authenticated dispatch.
 ```
 
-- [ ] **Step 2: Verify the doc renders sensibly**
+- [x] **Step 2: Verify the doc renders sensibly**
 
 Read the file back and confirm the new section sits between the
 existing step 3 (weekly sweep job) and step 4 (`/classify`'s trigger
 source), with consistent heading levels and no broken code fences.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/DEPLOY.md
@@ -893,6 +893,6 @@ git commit -m "Document Cloud Tasks queue setup and IAM for the audit path"
 
 ## Final verification
 
-- [ ] Run `.venv/bin/python -m pytest -v` — full suite passes, including the pre-existing `xfail` (identity-key underscore round-trip, untouched by this plan).
-- [ ] Run `.venv/bin/python -m ruff check .` — clean.
-- [ ] Confirm `git log --oneline -5` shows one commit per task, each with a passing state at the time it was made.
+- [x] Run `.venv/bin/python -m pytest -v` — full suite passes, including the pre-existing `xfail` (identity-key underscore round-trip, untouched by this plan).
+- [x] Run `.venv/bin/python -m ruff check .` — clean.
+- [x] Confirm `git log --oneline -5` shows one commit per task, each with a passing state at the time it was made.
