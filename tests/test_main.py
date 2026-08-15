@@ -1,6 +1,6 @@
 """
 Tests for main.py — the Cloud Run FastAPI service. Focused on the
-duplicate-audit guard, since that's the one piece of real logic living in
+Cloud Tasks wiring, since that's the one piece of real logic living in
 this file rather than in vor_agents/.
 """
 
@@ -9,7 +9,21 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import main
-from vor_agents.schemas import ClassifierOutput, Decision, UncertainReason
+from vor_agents.schemas import (
+    AuditorAction,
+    AuditorOutput,
+    ClassifierOutput,
+    Decision,
+    UncertainReason,
+)
+
+TASK_ENV = {
+    "GCP_PROJECT": "test-project",
+    "TASKS_LOCATION": "us-central1",
+    "TASKS_QUEUE": "vor-audit-queue",
+    "TASKS_OIDC_SA_EMAIL": "vor-scheduler@test-project.iam.gserviceaccount.com",
+    "SERVICE_URL": "https://vor-test.a.run.app",
+}
 
 
 def _suppress_result():
@@ -30,45 +44,93 @@ def test_healthz():
     assert resp.json() == {"status": "ok"}
 
 
-def test_classify_fires_audit_background_task_on_suppress(fake_firestore):
+def test_classify_enqueues_audit_task_on_suppress(fake_firestore, fake_tasks_client, monkeypatch):
+    for key, value in TASK_ENV.items():
+        monkeypatch.setenv(key, value)
     identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
 
     with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))), \
-         patch("main.audit_pattern", new=AsyncMock()) as mock_audit:
+         patch("main.get_tasks_client", return_value=fake_tasks_client), \
+         patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
         resp = client.post("/classify", json={"detection_rule_id": "rule"})
 
     assert resp.status_code == 200
     assert resp.json()["decision"] == "SUPPRESS"
-    mock_audit.assert_called_once()
-    assert mock_audit.call_args[0][0] == identity_key
+    assert len(fake_tasks_client.created_tasks) == 1
 
 
-def test_classify_skips_audit_if_already_under_review(fake_firestore):
-    """The duplicate-audit guard: if under_review is already True for
-    this identity_key, /classify must NOT schedule a second concurrent
-    audit for it."""
+def test_classify_does_not_enqueue_second_task_for_same_pattern(
+    fake_firestore, fake_tasks_client, monkeypatch
+):
+    """Replaces the old under_review app-level guard: dedup is now
+    enforced by Cloud Tasks task naming, not a read-then-act check."""
+    for key, value in TASK_ENV.items():
+        monkeypatch.setenv(key, value)
     identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
-    from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
-    fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).set(
-        {"under_review": True}
-    )
 
     with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))), \
-         patch("main.audit_pattern", new=AsyncMock()) as mock_audit:
+         patch("main.get_tasks_client", return_value=fake_tasks_client), \
+         patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
         client.post("/classify", json={"detection_rule_id": "rule"})
+        client.post("/classify", json={"detection_rule_id": "rule"})
 
-    mock_audit.assert_not_called()
+    assert len(fake_tasks_client.created_tasks) == 1
 
 
-def test_sweep_returns_audited_count(fake_firestore):
+def test_classify_returns_result_even_if_enqueue_fails(fake_firestore, monkeypatch):
+    """A failed audit *trigger* must never fail the classification
+    response."""
+    for key, value in TASK_ENV.items():
+        monkeypatch.setenv(key, value)
+    identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+    class _BoomTasksClient:
+        def queue_path(self, project, location, queue):
+            return f"projects/{project}/locations/{location}/queues/{queue}"
+
+        def create_task(self, parent, task):
+            raise RuntimeError("Cloud Tasks unavailable")
+
     with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.run_scheduled_sweep", new=AsyncMock(return_value=[1, 2, 3])):
+         patch("main.get_tasks_client", return_value=_BoomTasksClient()), \
+         patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
+        client = TestClient(main.app)
+        resp = client.post("/classify", json={"detection_rule_id": "rule"})
+
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "SUPPRESS"
+
+
+def test_sweep_returns_enqueued_count(fake_firestore):
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch("main.run_scheduled_sweep", return_value=[("a",), ("b",), ("c",)]):
         client = TestClient(main.app)
         resp = client.post("/sweep", json={})
 
     assert resp.status_code == 200
-    assert resp.json() == {"audited_count": 3}
+    assert resp.json() == {"enqueued": 3}
+
+
+def test_audit_endpoint_invokes_audit_pattern(fake_firestore):
+    identity_key = ["rule", "w3wp.exe", "csc.exe", "family"]
+    fake_decision = AuditorOutput(
+        action=AuditorAction.NO_ACTION,
+        invalidated_instance_ids=[],
+        concerns_found=[],
+        reasoning="clean",
+    )
+
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch("main.audit_pattern", new=AsyncMock(return_value=fake_decision)) as mock_audit:
+        client = TestClient(main.app)
+        resp = client.post(
+            "/audit", json={"identity_key": identity_key, "pattern_data": {"triggered_by": "test"}}
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["action"] == "NO_ACTION"
+    mock_audit.assert_called_once()
+    assert mock_audit.call_args[0][0] == tuple(identity_key)
+    assert mock_audit.call_args[0][1] == {"triggered_by": "test"}

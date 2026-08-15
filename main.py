@@ -1,29 +1,37 @@
 """
 Vör — Cloud Run entrypoint.
 
-Exposes the two trigger paths from the hybrid cadence decision:
+Exposes the trigger paths from the hybrid cadence decision:
   POST /classify — event-triggered primary path. A SUPPRESS decision means
                    this pattern's identity key just matched an incoming
                    alert again — exactly the trigger condition the auditor
-                   was designed around. Fires the audit as a background
-                   task so the classify response isn't held up waiting on
-                   a second LLM call.
+                   was designed around. Enqueues the audit onto Cloud
+                   Tasks so it runs in its own fully-CPU-allocated request
+                   rather than as in-process background work.
   POST /sweep    — scheduled safety-net path, invoked by Cloud Scheduler
                    for the quiet, low-volume patterns event-triggering
-                   would otherwise never revisit.
+                   would otherwise never revisit. Enqueues one audit task
+                   per selected target and returns immediately.
+  POST /audit    — the only place audit_pattern() actually runs. Reached
+                   exclusively via Cloud Tasks (OIDC-authenticated), never
+                   called directly by /classify or /sweep.
   GET  /healthz  — Cloud Run health check
 
 See DEPLOY.md for how this actually gets deployed and secured.
 """
 
-from fastapi import BackgroundTasks, FastAPI, Request
-from google.cloud import firestore
+import os
 
-from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+from fastapi import FastAPI, Request
+from google.cloud import firestore, tasks_v2
+from loguru import logger
+
 from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
+from vor_agents.task_queue import AuditEnqueueError, enqueue_audit
 
 app = FastAPI(title="Vör")
 _firestore_client = None
+_tasks_client = None
 
 
 def get_firestore_client():
@@ -35,36 +43,61 @@ def get_firestore_client():
     return _firestore_client
 
 
+def get_tasks_client():
+    # Lazy singleton, same shape as get_firestore_client().
+    global _tasks_client
+    if _tasks_client is None:
+        _tasks_client = tasks_v2.CloudTasksClient()
+    return _tasks_client
+
+
+def _queue_path() -> str:
+    return get_tasks_client().queue_path(
+        os.environ["GCP_PROJECT"], os.environ["TASKS_LOCATION"], os.environ["TASKS_QUEUE"]
+    )
+
+
+def _audit_url() -> str:
+    return f"{os.environ['SERVICE_URL']}/audit"
+
+
+def _enqueue(identity_key: tuple, pattern_data: dict) -> bool:
+    """
+    Shared enqueue path for both /classify and /sweep (passed into
+    run_scheduled_sweep as its enqueue_audit_fn). Never raises — an
+    enqueue failure must never fail the caller's own response; it's
+    logged and treated as "not enqueued" (False) so callers can still
+    react to that if they care (today, neither does).
+    """
+    try:
+        return enqueue_audit(
+            identity_key,
+            pattern_data,
+            get_tasks_client(),
+            _queue_path(),
+            _audit_url(),
+            os.environ["TASKS_OIDC_SA_EMAIL"],
+        )
+    except AuditEnqueueError:
+        logger.bind(identity_key=identity_key).error(
+            "Audit enqueue failed; caller's response is unaffected"
+        )
+        return False
+
+
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
 
 
 @app.post("/classify")
-async def classify(request: Request, background_tasks: BackgroundTasks):
+async def classify(request: Request):
     alert = await request.json()
     client = get_firestore_client()
     result, identity_key = await classify_alert(alert, client)
 
     if result.decision == "SUPPRESS":
-        # Guard against firing a second concurrent audit on a pattern
-        # that's already mid-review — a burst of the same SUPPRESS-eligible
-        # pattern arriving faster than one audit completes would otherwise
-        # schedule duplicate auditor LLM calls for the same identity_key.
-        # Cheap read, no LLM involved, same "check before acting" shape as
-        # everything else deterministic in this design.
-        doc = client.collection(CONFIDENCE_COLLECTION).document(
-            _doc_id(identity_key)
-        ).get()
-        already_under_review = doc.exists and doc.to_dict().get("under_review", False)
-
-        if not already_under_review:
-            background_tasks.add_task(
-                audit_pattern,
-                identity_key,
-                {"triggered_by": "classify_suppress"},
-                client,
-            )
+        _enqueue(identity_key, {"triggered_by": "classify_suppress"})
 
     return result.model_dump()
 
@@ -79,5 +112,22 @@ async def sweep(request: Request):
     NOT deploy this endpoint with --allow-unauthenticated in production.
     """
     client = get_firestore_client()
-    results = await run_scheduled_sweep(client)
-    return {"audited_count": len(results)}
+    enqueued = run_scheduled_sweep(client, _enqueue)
+    return {"enqueued": len(enqueued)}
+
+
+@app.post("/audit")
+async def audit(request: Request):
+    """
+    Reached exclusively via a Cloud Tasks dispatch — never called
+    directly by /classify or /sweep. This is the one place
+    audit_pattern() actually runs, inside its own fully-CPU-allocated
+    request. Gated by Cloud Run IAM the same way /sweep is (OIDC,
+    never --allow-unauthenticated) — no manual token check needed here.
+    """
+    payload = await request.json()
+    identity_key = tuple(payload["identity_key"])
+    pattern_data = payload["pattern_data"]
+    client = get_firestore_client()
+    decision = await audit_pattern(identity_key, pattern_data, client)
+    return decision.model_dump()
