@@ -30,7 +30,7 @@
 **Interfaces:**
 - Produces: `FakeTasksClient` class and `fake_tasks_client` pytest fixture, both used by Task 2's tests onward. `FakeTasksClient.created_tasks: dict[str, dict]` (task name → task dict), `.create_task(parent: str, task: dict) -> dict`, `.queue_path(project: str, location: str, queue: str) -> str`, `.task_path(project: str, location: str, queue: str, task: str) -> str`.
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 Edit `requirements.txt`:
 
@@ -43,12 +43,12 @@ fastapi
 uvicorn[standard]
 ```
 
-- [ ] **Step 2: Install it**
+- [x] **Step 2: Install it**
 
 Run: `uv pip install -r requirements.txt -r requirements-dev.txt --python .venv/bin/python`
 Expected: `google-cloud-tasks` (and its transitive deps) installed with no errors.
 
-- [ ] **Step 3: Add `FakeTasksClient` to `tests/conftest.py`**
+- [x] **Step 3: Add `FakeTasksClient` to `tests/conftest.py`**
 
 Append to the end of `tests/conftest.py` (after the existing `fake_firestore` fixture):
 
@@ -89,12 +89,12 @@ def fake_tasks_client():
     return FakeTasksClient()
 ```
 
-- [ ] **Step 4: Verify the test suite still collects and passes (no behavior changed yet)**
+- [x] **Step 4: Verify the test suite still collects and passes (no behavior changed yet)**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: same pass count as before this task (no new tests reference the fixture yet, so nothing new runs — this just confirms the fixture doesn't break collection).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add requirements.txt tests/conftest.py
@@ -114,7 +114,7 @@ git commit -m "Add FakeTasksClient test double and google-cloud-tasks dependency
 - Consumes: `FakeTasksClient` / `fake_tasks_client` fixture (Task 1).
 - Produces: `AuditEnqueueError(Exception)`, `_task_name(queue_path: str, identity_key: tuple) -> str`, `enqueue_audit(identity_key: tuple, pattern_data: dict, tasks_client, queue_path: str, audit_url: str, oidc_service_account_email: str) -> bool` — all consumed by Task 3 (`orchestrator.py`) and Tasks 4–6 (`main.py`).
 
-- [ ] **Step 1: Add `loguru` dependency**
+- [x] **Step 1: Add `loguru` dependency**
 
 Edit `requirements.txt`, add after `google-cloud-tasks`:
 
@@ -130,7 +130,7 @@ uvicorn[standard]
 
 Run: `uv pip install -r requirements.txt -r requirements-dev.txt --python .venv/bin/python`
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Create `tests/test_task_queue.py`:
 
@@ -208,12 +208,12 @@ class TestEnqueueAudit:
             )
 ```
 
-- [ ] **Step 3: Run the tests to verify they fail**
+- [x] **Step 3: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_task_queue.py -v`
 Expected: `ModuleNotFoundError: No module named 'vor_agents.task_queue'` (collection error) — fails because the module doesn't exist yet.
 
-- [ ] **Step 4: Write `vor_agents/task_queue.py`**
+- [x] **Step 4: Write `vor_agents/task_queue.py`**
 
 ```python
 """
@@ -316,17 +316,17 @@ def enqueue_audit(
     return True
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_task_queue.py -v`
 Expected: all 7 tests PASS.
 
-- [ ] **Step 6: Run the full suite and lint**
+- [x] **Step 6: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check .`
 Expected: all pass, no regressions, no lint errors.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add requirements.txt vor_agents/task_queue.py tests/test_task_queue.py
@@ -345,7 +345,7 @@ git commit -m "Add vor_agents.task_queue: deterministic naming + Cloud Tasks enq
 - Consumes: nothing new imported — takes an `enqueue_audit_fn: Callable[[tuple, dict], bool]` parameter injected by the caller (Task 4 wires the real one; this task's tests use a plain local fake function). Orchestrator stays decoupled from Cloud Tasks config specifics, same as it already receives `firestore_client` generically rather than constructing one itself.
 - Produces: `run_scheduled_sweep(firestore_client, enqueue_audit_fn, max_targets: int = 10) -> list[tuple]` — **no longer `async`**, returns the list of identity_keys that were newly enqueued (dedup hits excluded). Consumed by Task 4 (`main.py`'s `/sweep`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_orchestrator.py` (new top-level import and new test class — this class is NOT `@pytest.mark.asyncio` since `run_scheduled_sweep` is now synchronous):
 
@@ -405,12 +405,12 @@ class TestRunScheduledSweep:
         assert result == []
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_orchestrator.py::TestRunScheduledSweep -v`
 Expected: `TypeError: run_scheduled_sweep() missing 1 required positional argument: 'enqueue_audit_fn'` (current signature is `(firestore_client, max_targets=10)`).
 
-- [ ] **Step 3: Replace `run_scheduled_sweep()` in `vor_agents/orchestrator.py`**
+- [x] **Step 3: Replace `run_scheduled_sweep()` in `vor_agents/orchestrator.py`**
 
 Replace the existing function (currently at lines 186-204):
 
@@ -450,17 +450,17 @@ def run_scheduled_sweep(
     return enqueued
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_orchestrator.py -v`
 Expected: all tests in the file PASS, including the 3 new ones.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check .`
 Expected: all pass except `test_main.py`'s `test_sweep_returns_audited_count`, which will FAIL at this point — `main.py`'s existing call to `run_scheduled_sweep(firestore_client)` doesn't match the new `(firestore_client, enqueue_audit_fn, max_targets=10)` signature yet. Confirm it's the only failure, then proceed — it gets fixed (test replaced, `main.py` rewritten) in Task 4.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/orchestrator.py tests/test_orchestrator.py
@@ -487,7 +487,7 @@ one already implemented.
 - Consumes: `enqueue_audit`, `AuditEnqueueError` from `vor_agents.task_queue` (Task 2); `run_scheduled_sweep` from `vor_agents.orchestrator` (Task 3).
 - Produces: `get_tasks_client()`, `_enqueue(identity_key: tuple, pattern_data: dict) -> bool` (module-private helper in `main.py`). `_enqueue` never raises — it catches `AuditEnqueueError` internally and returns `False`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Rewrite `tests/test_main.py` in full (small file, easier than a partial
 patch): keep `test_healthz` unchanged, drop the two `under_review`-guard
@@ -626,12 +626,12 @@ def test_audit_endpoint_invokes_audit_pattern(fake_firestore):
 `AsyncMock` — it's synchronous now, per Task 3. Leave `test_healthz` in
 place unchanged.
 
-- [ ] **Step 2: Run the new/changed tests to verify they fail**
+- [x] **Step 2: Run the new/changed tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_main.py -v`
 Expected: the `/classify` enqueue tests fail with `AttributeError`/`ImportError`-style failures (`main.get_tasks_client` doesn't exist yet); `test_sweep_returns_enqueued_count` fails (old `main.py` still returns `audited_count`); `test_audit_endpoint_invokes_audit_pattern` fails with a 404 (no `/audit` route exists yet). `test_healthz` still passes.
 
-- [ ] **Step 3: Rewrite `main.py`**
+- [x] **Step 3: Rewrite `main.py`**
 
 Replace the full file contents:
 
@@ -771,22 +771,22 @@ async def audit(request: Request):
     return decision.model_dump()
 ```
 
-- [ ] **Step 4: Run all the tests to verify they pass**
+- [x] **Step 4: Run all the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_main.py -v`
 Expected: all tests PASS, including `test_healthz` (untouched) and all 5 new/changed tests.
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: all tests PASS, zero failures anywhere in the suite.
 
-- [ ] **Step 6: Lint**
+- [x] **Step 6: Lint**
 
 Run: `.venv/bin/python -m ruff check .`
 Expected: passes (no unused imports — `BackgroundTasks`, `CONFIDENCE_COLLECTION`, `_doc_id` are no longer imported in `main.py`).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add main.py tests/test_main.py
