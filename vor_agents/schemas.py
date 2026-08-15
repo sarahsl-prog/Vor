@@ -46,6 +46,18 @@ class ClassifierOutput(BaseModel):
     confidence_used: float | None = None
 
 
+class AuditRequest(BaseModel):
+    """Body shape for POST /audit. Cloud Tasks is the only caller (via
+    the queue task body task_queue.py constructs) — validating here
+    turns a malformed/truncated payload into a clear 422 instead of an
+    unhandled KeyError-turned-500, so it fails visibly and predictably
+    rather than burning Cloud Tasks' retry budget on a payload that will
+    never succeed."""
+
+    identity_key: list[str]
+    pattern_data: dict
+
+
 class AuditorAction(str, Enum):
     NO_ACTION = "NO_ACTION"
     DOWNGRADE = "DOWNGRADE"

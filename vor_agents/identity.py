@@ -33,6 +33,27 @@ GRADUATION_THRESHOLD = 3   # minimum confirmed instances
 MIN_DIVERSITY = 0.5        # minimum evidence_diversity_score, see evidence_diversity.py
 
 
+class MalformedAlertError(ValueError):
+    """
+    Raised when a confirmed instance is missing one or more DIFFABLE_FIELDS.
+    These fields are required structural data, not optional context (unlike
+    evidence_diversity_score's host/user/timestamp, which degrade
+    gracefully when absent) — a missing one means the alert/ingestion
+    pipeline produced bad data, not that the field "doesn't apply here".
+    Raised instead of letting a bare KeyError propagate out of
+    build_structural_template, per this project's error-handling standard:
+    external/user input is validated, never surfaced as a raw exception.
+    """
+
+
+def _validate_diffable_fields(instance: dict) -> None:
+    missing = [field for field in DIFFABLE_FIELDS if field not in instance]
+    if missing:
+        raise MalformedAlertError(
+            f"Confirmed instance is missing required diffable field(s): {missing}"
+        )
+
+
 def pattern_identity_key(alert: dict) -> tuple:
     """
     (detection_rule_id, parent_image, child_image, endpoint_family)
@@ -63,6 +84,11 @@ def build_structural_template(
             "diversity_score": float,
         }
 
+    Raises MalformedAlertError if any instance is missing a DIFFABLE_FIELDS
+    key — this is the single choke point every caller (record_confirmed_
+    negative, seed_template, invalidate_instances' rebuild) goes through,
+    so validation happens exactly once regardless of entry point.
+
     provenance "seeded" = bulk-imported (e.g. dataset case #1) rather than
     earned one live human confirmation at a time. Structurally identical
     once built, but worth tracking so a bad seeded assumption can be traced
@@ -75,6 +101,9 @@ def build_structural_template(
     sufficient by itself — see the module-level comment above these
     constants for why count-only graduation is statistically weak.
     """
+    for instance in confirmed_negative_instances:
+        _validate_diffable_fields(instance)
+
     fields = {}
     for field in DIFFABLE_FIELDS:
         values = {instance[field] for instance in confirmed_negative_instances}

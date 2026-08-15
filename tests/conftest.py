@@ -206,3 +206,39 @@ class FakeFirestoreClient:
 @pytest.fixture
 def fake_firestore():
     return FakeFirestoreClient()
+
+
+from google.api_core.exceptions import AlreadyExists
+
+
+class FakeTasksClient:
+    """
+    In-memory stand-in for google.cloud.tasks_v2.CloudTasksClient.
+    Supports exactly what vor_agents.task_queue uses: create_task() with
+    a task name that collides raises the SAME AlreadyExists exception
+    the real client raises (imported from google.api_core.exceptions,
+    not a fake stand-in type), so enqueue_audit()'s dedup handling is
+    exercised against the real error type. Deliberately not a full Cloud
+    Tasks emulator — tests should never need real GCP credentials or
+    network access to run.
+    """
+    def __init__(self):
+        self.created_tasks: dict[str, dict] = {}
+
+    def create_task(self, parent: str, task: dict) -> dict:
+        name = task["name"]
+        if name in self.created_tasks:
+            raise AlreadyExists(f"Task already exists: {name}")
+        self.created_tasks[name] = task
+        return task
+
+    def queue_path(self, project: str, location: str, queue: str) -> str:
+        return f"projects/{project}/locations/{location}/queues/{queue}"
+
+    def task_path(self, project: str, location: str, queue: str, task: str) -> str:
+        return f"{self.queue_path(project, location, queue)}/tasks/{task}"
+
+
+@pytest.fixture
+def fake_tasks_client():
+    return FakeTasksClient()

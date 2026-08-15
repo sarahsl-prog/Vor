@@ -6,6 +6,7 @@ auditor_agent.py) with no orchestration logic of its own.
 """
 
 import json
+import uuid
 from datetime import datetime, timezone
 
 from google.adk.runners import Runner
@@ -108,8 +109,15 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
 
     classifier = build_classifier_agent()
     identity_key = enrichment.get("pattern_identity_key", ("unknown",))
+    # session_id is unique per call (uuid4), not just per identity_key: the
+    # classifier is meant to be stateless per-call (see enrich()'s
+    # docstring — "reasons over exactly this, nothing more"). Reusing a
+    # session_id across repeat calls for the same recurring pattern would
+    # let ADK accumulate conversation history into the same session,
+    # silently biasing later calls with earlier turns. identity_key is
+    # kept as a log-correlation prefix only, not as the dedup key.
     result = await _run_agent(
-        classifier, prompt, session_id=f"classify_{'_'.join(identity_key)}"
+        classifier, prompt, session_id=f"classify_{'_'.join(identity_key)}_{uuid.uuid4()}"
     )
     classifier_output = ClassifierOutput.model_validate(result)
 
@@ -141,6 +149,29 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
         # find) is deliberately NOT overridden — the model being more
         # cautious than the deterministic check is the safe direction and
         # doesn't need correction, just isn't flagged as an error here.
+
+    if classifier_output.structural_deviations_found and classifier_output.decision == "SUPPRESS":
+        # Self-consistency override, independent of the ground-truth
+        # reconciliation above (and of whether it even ran — this fires
+        # even when precomputed_deviations is empty). The classifier's own
+        # prompt (rule 4) requires any non-empty structural_deviations_found
+        # to force ESCALATE; nothing previously enforced that internally,
+        # so a model reporting a deviation (real or hallucinated) while
+        # still emitting SUPPRESS sailed through untouched whenever that
+        # deviation wasn't also in the deterministic diff. Same "force the
+        # safe outcome in code" principle as the check above — a model
+        # contradicting its own stated rule can't be trusted regardless of
+        # what ground truth separately found.
+        classifier_output = classifier_output.model_copy(update={
+            "decision": "ESCALATE",
+            "reasoning": (
+                classifier_output.reasoning
+                + " [Vör correctness override: model reported structural "
+                "deviation(s) but decision was SUPPRESS, contradicting its "
+                "own classification rule that any deviation forces "
+                "ESCALATE; overridden to ESCALATE.]"
+            ),
+        })
 
     return classifier_output, identity_key
 
@@ -174,8 +205,11 @@ async def audit_pattern(
         "Review this suppression decision per your instructions."
     )
     auditor = build_auditor_agent()
+    # Same unique-session-per-call rationale as classify_alert() above —
+    # each audit is a fresh, independent review, not a continuation of a
+    # prior one for this pattern.
     result = await _run_agent(
-        auditor, prompt, session_id=f"audit_{'_'.join(identity_key)}"
+        auditor, prompt, session_id=f"audit_{'_'.join(identity_key)}_{uuid.uuid4()}"
     )
     decision = AuditorOutput.model_validate(result)
 
@@ -183,7 +217,9 @@ async def audit_pattern(
     return decision
 
 
-async def run_scheduled_sweep(firestore_client, max_targets: int = 10) -> list:
+def run_scheduled_sweep(
+    firestore_client, enqueue_audit_fn, max_targets: int = 10
+) -> list[tuple]:
     """
     Safety-net path — invoked on a timer (e.g. weekly Cloud Scheduler job
     hitting a Cloud Run endpoint that calls this function). Reuses the
@@ -191,17 +227,29 @@ async def run_scheduled_sweep(firestore_client, max_targets: int = 10) -> list:
     would use if it fired for these patterns, which it may never do for
     quiet, low-volume ones — that's the coverage gap this sweep exists to
     close.
+
+    No longer runs audits itself — enqueues one Cloud Tasks task per
+    selected target via enqueue_audit_fn (identity_key, pattern_data) ->
+    bool, and returns the identity_keys that were newly enqueued (a
+    dedup hit — the pattern already has an audit in flight — returns
+    False from enqueue_audit_fn and is excluded from the result). The
+    actual audit runs later, in its own request, when Cloud Tasks
+    dispatches to POST /audit — see task_queue.py and main.py.
+
+    enqueue_audit_fn is dependency-injected rather than imported and
+    called directly: this function doesn't need to know Cloud Tasks
+    config specifics (queue path, audit URL, OIDC service account) any
+    more than it needs to know how firestore_client was constructed.
     """
     all_suppressed = _fetch_all_suppressed_patterns(firestore_client)
     targets = select_audit_targets(all_suppressed, max_targets=max_targets)
 
-    results = []
+    enqueued = []
     for pattern in targets:
-        decision = await audit_pattern(
-            pattern["identity_key"], pattern, firestore_client
-        )
-        results.append((pattern["identity_key"], decision))
-    return results
+        was_new = enqueue_audit_fn(pattern["identity_key"], pattern)
+        if was_new:
+            enqueued.append(pattern["identity_key"])
+    return enqueued
 
 
 def _fetch_all_suppressed_patterns(firestore_client) -> list[dict]:

@@ -3,9 +3,12 @@ Tests for vor_agents.identity — pattern identity, structural templates,
 the two-part graduation gate, and exhaustive field diffing.
 """
 
+import pytest
+
 from vor_agents.identity import (
     GRADUATION_THRESHOLD,
     MIN_DIVERSITY,
+    MalformedAlertError,
     build_structural_template,
     diff_alert_against_template,
     pattern_identity_key,
@@ -93,6 +96,20 @@ class TestBuildStructuralTemplate:
     def test_provenance_passed_through(self, diverse_confirmed_instances):
         result = build_structural_template(diverse_confirmed_instances, provenance="seeded")
         assert result["provenance"] == "seeded"
+
+    def test_instance_missing_diffable_field_raises_malformed_alert_error(
+        self, diverse_confirmed_instances
+    ):
+        """A confirmed instance missing a required DIFFABLE_FIELDS key
+        must fail loudly and clearly, not with a raw KeyError. Structural
+        fields are required (unlike evidence_diversity_score's optional
+        host/user/timestamp dimensions), so a missing one is a
+        data-quality problem, not a 'field just varies here' signal."""
+        malformed = [dict(diverse_confirmed_instances[0])]
+        del malformed[0]["integrity_level"]
+
+        with pytest.raises(MalformedAlertError, match="integrity_level"):
+            build_structural_template(malformed)
 
 
 class TestDiffAlertAgainstTemplate:
