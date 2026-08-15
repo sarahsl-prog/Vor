@@ -169,6 +169,27 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
             identity_key,
         )
 
+    if enrichment.get("under_review") and classifier_output.decision == "SUPPRESS":
+        # The classifier prompt already tells the model to treat
+        # under_review=True as provisional and avoid SUPPRESS, but nothing
+        # previously enforced that in code — a non-compliant or
+        # hallucinating model returning SUPPRESS anyway sailed through
+        # untouched. This is exactly the burst-replay race under_review
+        # was built to close (see review_flag.py): an audit is actively
+        # re-checking this pattern's evidence right now, so autonomously
+        # trusting a fresh SUPPRESS for it is the dangerous direction.
+        # Same "force the safe outcome in code, don't ask the model to
+        # reconsider" principle as every other override in this function.
+        classifier_output = classifier_output.model_copy(update={
+            "decision": "UNCERTAIN",
+            "uncertain_reason": "under_review",
+            "reasoning": (
+                classifier_output.reasoning
+                + " [Vör correctness override: pattern is under active "
+                "audit; SUPPRESS not allowed until review completes.]"
+            ),
+        })
+
     if precomputed_deviations:
         precomputed_fields = _deviation_field_names(precomputed_deviations)
         reported_fields = _deviation_field_names(classifier_output.structural_deviations_found)
