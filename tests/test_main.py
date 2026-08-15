@@ -155,6 +155,34 @@ def test_sweep_returns_enqueued_count(fake_firestore):
     assert resp.json() == {"enqueued": 3}
 
 
+def test_sweep_returns_result_if_enqueue_misconfigured(
+    fake_firestore, fake_tasks_client, monkeypatch, diverse_confirmed_instances
+):
+    """/sweep must never 500 on a deploy misconfiguration (missing env
+    var) — same guarantee /classify already has via _enqueue's own
+    try/except, exercised here through the real run_scheduled_sweep ->
+    _enqueue path instead of a mock, with an actual confirmed pattern in
+    Firestore so there's a real target to (fail to) enqueue."""
+    from vor_agents.enrichment import record_confirmed_negative
+
+    for key, value in TASK_ENV.items():
+        if key != "TASKS_OIDC_SA_EMAIL":
+            monkeypatch.setenv(key, value)
+    monkeypatch.delenv("TASKS_OIDC_SA_EMAIL", raising=False)
+
+    for instance in diverse_confirmed_instances:
+        record_confirmed_negative(instance, fake_firestore)
+
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch("main.get_tasks_client", return_value=fake_tasks_client):
+        client = TestClient(main.app)
+        resp = client.post("/sweep", json={})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"enqueued": 0}
+    assert len(fake_tasks_client.created_tasks) == 0
+
+
 def test_audit_endpoint_invokes_audit_pattern(fake_firestore):
     identity_key = ["rule", "w3wp.exe", "csc.exe", "family"]
     fake_decision = AuditorOutput(
@@ -200,6 +228,47 @@ def test_audit_endpoint_rejects_non_json_body(fake_firestore):
         resp = client.post("/audit", content=b"not json", headers={"content-type": "application/json"})
 
     assert resp.status_code == 422
+
+
+def test_audit_endpoint_returns_422_on_malformed_stored_data(fake_firestore):
+    """Regression coverage: audit_pattern()'s own try/except (Task 1)
+    covers model/parsing failures, but NOT mark_under_review() (before
+    that try block) or the invalidate_instances() rebuild inside
+    clear_under_review() (in its finally block) — a MalformedAlertError
+    raised from stored data missing a DIFFABLE_FIELDS key can still
+    escape audit_pattern(). Must be a 422 (permanent, not worth
+    retrying), not a bare 500."""
+    from vor_agents.identity import MalformedAlertError
+
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch(
+             "main.audit_pattern",
+             new=AsyncMock(side_effect=MalformedAlertError("missing field: integrity_level")),
+         ):
+        client = TestClient(main.app)
+        resp = client.post(
+            "/audit", json={"identity_key": ["a", "b", "c", "d"], "pattern_data": {}}
+        )
+
+    assert resp.status_code == 422
+    assert "integrity_level" in resp.json()["detail"]
+
+
+def test_audit_endpoint_returns_500_on_unexpected_failure(fake_firestore):
+    """A truly unexpected failure (Firestore unavailable, network) is the
+    retryable direction — must stay a 500 so Cloud Tasks retries it,
+    unlike the malformed-data case above."""
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch(
+             "main.audit_pattern",
+             new=AsyncMock(side_effect=RuntimeError("Firestore unavailable")),
+         ):
+        client = TestClient(main.app)
+        resp = client.post(
+            "/audit", json={"identity_key": ["a", "b", "c", "d"], "pattern_data": {}}
+        )
+
+    assert resp.status_code == 500
 
 
 def test_classify_rejects_missing_identity_fields(fake_firestore):
