@@ -23,6 +23,7 @@ from vor_agents.enrichment import (
 )
 from vor_agents.orchestrator import (
     AgentOutputError,
+    _deviation_field_names,
     _run_agent,
     audit_pattern,
     classify_alert,
@@ -205,6 +206,39 @@ class TestSelfConsistency:
 
         assert result.decision == "ESCALATE"
         assert "override" not in result.reasoning.lower()
+
+
+class TestDeviationFieldNames:
+    """
+    Regression coverage: a deviation string not following the
+    "field: template=X, observed=Y" format (the model not following its
+    own output rules, or phrasing it differently) used to be treated as a
+    whole-string field name, which can never match a real template field
+    name on either side of the reconciliation diff. Must now be skipped
+    (and logged) instead of silently corrupting the field-name set.
+    """
+
+    def test_well_formed_strings_extract_field_name(self):
+        result = _deviation_field_names([
+            "integrity_level: template=Medium, observed=High",
+            "file_access_mode: template=read, observed=write",
+        ])
+        assert result == {"integrity_level", "file_access_mode"}
+
+    def test_colon_less_string_is_skipped_not_treated_as_field_name(self):
+        result = _deviation_field_names([
+            "integrity_level observed High instead of Medium",
+        ])
+        assert result == set()
+
+    def test_mix_of_well_formed_and_malformed_keeps_only_well_formed(self):
+        result = _deviation_field_names([
+            "integrity_level: template=Medium, observed=High",
+            "malformed deviation with no colon at all",
+            "",
+            "  ",
+        ])
+        assert result == {"integrity_level"}
 
 
 @pytest.mark.asyncio
