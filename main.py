@@ -22,10 +22,11 @@ See DEPLOY.md for how this actually gets deployed and secured.
 
 import os
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from google.cloud import firestore, tasks_v2
 from loguru import logger
 
+from vor_agents.identity import MalformedAlertError
 from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
 from vor_agents.schemas import AuditRequest, ClassifierRequest
 from vor_agents.task_queue import AuditEnqueueError, enqueue_audit
@@ -144,7 +145,36 @@ async def audit(payload: AuditRequest):
     than an unhandled KeyError-turned-500, so it fails predictably
     instead of burning Cloud Tasks' retry budget on a payload that can
     never succeed.
+
+    audit_pattern() itself already degrades model/parsing failures to a
+    logged NO_ACTION decision (see orchestrator.py's try/except/finally)
+    rather than raising — but mark_under_review() (before that try block)
+    and the invalidate_instances() rebuild inside clear_under_review()
+    (in its finally block) are NOT covered by it, so a Firestore write
+    failure or malformed stored evidence can still raise out of this call.
+    Split those on the same "retryable vs permanent" line Cloud Tasks
+    itself cares about: a transient Firestore/network error is exactly
+    what its retry budget exists for (500, let it retry); malformed data
+    already in Firestore will fail identically on every retry (422,
+    correctness bug for a human to fix, not something retrying helps).
     """
     client = get_firestore_client()
-    decision = await audit_pattern(tuple(payload.identity_key), payload.pattern_data, client)
+    try:
+        decision = await audit_pattern(tuple(payload.identity_key), payload.pattern_data, client)
+    except MalformedAlertError as exc:
+        logger.bind(identity_key=payload.identity_key).error(
+            "Audit failed on malformed stored data: {}", exc
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        # Catch-all deliberate: any other failure here (Firestore
+        # unavailable, network) is the retryable direction. Logged with
+        # full context and re-raised as an explicit 500 rather than left
+        # to propagate as FastAPI's generic unhandled-exception response,
+        # so it's visible in logs with identity_key attached instead of
+        # just a stack trace.
+        logger.bind(identity_key=payload.identity_key).exception(
+            "Audit endpoint failed unexpectedly"
+        )
+        raise HTTPException(status_code=500, detail="Audit failed, will be retried") from exc
     return decision.model_dump()
