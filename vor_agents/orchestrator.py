@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
+from loguru import logger
 
 from .audit_targets import select_audit_targets
 from .auditor_agent import build_auditor_agent
@@ -21,11 +22,22 @@ from .enrichment import CONFIDENCE_COLLECTION, _doc_id, enrich
 from .evidence_diversity import evidence_diversity_score
 from .identity import diff_alert_against_template
 from .review_flag import clear_under_review, mark_under_review
-from .schemas import AuditorOutput, ClassifierOutput
+from .schemas import AuditorOutput, ClassifierOutput, Decision, UncertainReason
 
 session_service = InMemorySessionService()  # swap for a persistent
                                              # SessionService in production;
                                              # fine for a hackathon demo
+
+
+class AgentOutputError(Exception):
+    """
+    Raised when _run_agent() can't turn a model response into a dict —
+    empty output, Markdown code fences, truncated JSON, or any other
+    non-JSON text. Wraps the underlying json.JSONDecodeError so callers
+    (classify_alert, audit_pattern) never see a raw stdlib exception, same
+    "never surface raw exceptions" standard as MalformedAlertError in
+    identity.py and AuditEnqueueError in task_queue.py.
+    """
 
 
 async def _run_agent(agent, prompt_text: str, session_id: str) -> dict:
@@ -43,9 +55,20 @@ async def _run_agent(agent, prompt_text: str, session_id: str) -> dict:
     ):
         if event.content and event.content.parts:
             for part in event.content.parts:
-                if getattr(part, "text", None):
-                    result_text += part.text
-    return json.loads(result_text)
+                # getattr (not direct attribute access) so mypy sees an
+                # Any here rather than the declared str | None on
+                # part.text — the truthiness check already guarantees
+                # non-None/non-empty, but mypy can't narrow a separate
+                # attribute access through that guard.
+                text = getattr(part, "text", None)
+                if text:
+                    result_text += text
+    try:
+        return json.loads(result_text)
+    except json.JSONDecodeError as exc:
+        raise AgentOutputError(
+            f"Model did not return valid JSON (length={len(result_text)}): {exc}"
+        ) from exc
 
 
 def _deviation_field_names(deviation_strings: list[str]) -> set[str]:
@@ -116,10 +139,29 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
     # let ADK accumulate conversation history into the same session,
     # silently biasing later calls with earlier turns. identity_key is
     # kept as a log-correlation prefix only, not as the dedup key.
-    result = await _run_agent(
-        classifier, prompt, session_id=f"classify_{'_'.join(identity_key)}_{uuid.uuid4()}"
-    )
-    classifier_output = ClassifierOutput.model_validate(result)
+    try:
+        result = await _run_agent(
+            classifier, prompt, session_id=f"classify_{'_'.join(identity_key)}_{uuid.uuid4()}"
+        )
+        classifier_output = ClassifierOutput.model_validate(result)
+    except AgentOutputError as exc:
+        # Model returned unparseable output (empty, Markdown-fenced,
+        # truncated JSON). This must not surface as a 500 to the /classify
+        # caller — degrade to UNCERTAIN, same "force a safe outcome in
+        # code" principle as every other trust decision in this system.
+        # No reconciliation to run below: there's no classifier_output to
+        # reconcile against.
+        logger.bind(identity_key=identity_key).error("Classifier output unparseable: {}", exc)
+        return (
+            ClassifierOutput(
+                decision=Decision.UNCERTAIN,
+                matched_pattern_id=None,
+                uncertain_reason=UncertainReason.MISSING_DATA,
+                structural_deviations_found=[],
+                reasoning=f"Classifier returned unparseable output: {exc}",
+            ),
+            identity_key,
+        )
 
     if precomputed_deviations:
         precomputed_fields = _deviation_field_names(precomputed_deviations)
