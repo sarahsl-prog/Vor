@@ -39,8 +39,17 @@ def _task_name(queue_path: str, identity_key: tuple) -> str:
     restricted to [A-Za-z0-9_-] and a fixed max length, and identity_key
     components (rule IDs, process names) aren't guaranteed to fit either
     constraint.
+
+    Hashes the JSON-encoded tuple, not "_".join(identity_key) — the same
+    collision risk flagged for enrichment._doc_id applies here too:
+    ("a", "b_c") and ("a_b", "c") would otherwise hash to the same task
+    name and silently dedup against each other. usedforsecurity=False:
+    this hash is for deterministic naming/dedup, not a security boundary
+    (see BLAST_RADIUS_PLAYBOOK.md's threat model — task names aren't
+    secret or trust-bearing), which also satisfies Bandit's B324 check.
     """
-    key_hash = hashlib.sha1("_".join(identity_key).encode()).hexdigest()
+    encoded = json.dumps(list(identity_key), separators=(",", ":"))
+    key_hash = hashlib.sha1(encoded.encode(), usedforsecurity=False).hexdigest()
     return f"{queue_path}/tasks/audit-{key_hash}"
 
 

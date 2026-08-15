@@ -187,13 +187,15 @@ model failing to notice a real deviation can't silently result in an
 autonomous SUPPRESS.
 
 ## Known gaps — not yet resolved
-1. **Identity-key round-trip is fragile**: `_fetch_all_suppressed_patterns()`
-   reconstructs `identity_key` by splitting the Firestore doc ID on `"_"`
-   (`_doc_id()`'s join character). If any component of the key itself
-   contains an underscore (a rule ID or process name with one), this
-   split produces a wrong or over-segmented tuple. Not yet fixed — doc IDs
-   should probably use a safer delimiter or store the key as a separate
-   field instead of relying on the ID round-tripping.
+
+(Identity-key round-trip fragility — fixed. `_doc_id()` now hashes the
+identity_key tuple instead of joining it with `"_"`, and every write path
+stores `identity_key` as its own Firestore field; readers use that field
+instead of parsing the doc ID. See `docs/TODO-Aug15.md` Task 3. Existing
+Firestore data written before this change won't have the `identity_key`
+field — `_fetch_all_suppressed_patterns()` skips and logs a warning for
+any doc missing it rather than crashing, but a one-time migration/backfill
+is still needed before this matters in a real deployment.)
 
 ## Not yet built
 - Dataset generation for the 6 synthetic cases

@@ -6,6 +6,8 @@ classifier prompt describes as "enrichment context" — the agent never
 fetches this itself.
 """
 
+import hashlib
+import json
 import uuid
 
 from .identity import build_structural_template, pattern_identity_key
@@ -14,7 +16,24 @@ CONFIDENCE_COLLECTION = "confidence_docs"
 
 
 def _doc_id(identity_key: tuple) -> str:
-    return "_".join(identity_key)
+    """
+    Doc ID is a content hash of the identity_key tuple, not a "_"-joined
+    string. The join-based scheme was ambiguous and lossy: identity_key
+    components (rule IDs, process names) aren't guaranteed to be
+    underscore-free, so ("a", "b_c"), ("a_b", "c"), and ("a", "b", "c")
+    all joined to the same "a_b_c" doc ID, and splitting it back apart
+    couldn't tell which was which.
+
+    The doc ID no longer needs to be reversible — every write path now
+    also stores the identity_key as a first-class array field on the doc
+    itself (see record_confirmed_negative / seed_template), and readers
+    that need the tuple back (e.g. _fetch_all_suppressed_patterns) read
+    that field instead of parsing the ID. json.dumps with sorted
+    separators guarantees the same tuple always hashes to the same ID
+    regardless of any incidental formatting differences.
+    """
+    encoded = json.dumps(list(identity_key), separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def enrich(alert: dict, firestore_client) -> dict:
@@ -95,6 +114,13 @@ def record_confirmed_negative(
     template = build_structural_template(instances, provenance="live")
     doc_ref.set(
         {
+            # Stored as a first-class field, not just encoded into the doc
+            # ID — see _doc_id()'s docstring. list(), not the tuple itself:
+            # Firestore has no tuple type and would silently coerce it to
+            # a list anyway; storing it explicitly as a list keeps the
+            # round-trip (list -> tuple(...) on read) obvious rather than
+            # implicit.
+            "identity_key": list(identity_key),
             "confirmed_instances": instances,
             "fields": template["fields"],
             "tier": template["tier"],
@@ -127,6 +153,7 @@ def seed_template(
     )
     doc_ref.set(
         {
+            "identity_key": list(identity_key),
             "confirmed_instances": seeded_instances,
             "fields": template["fields"],
             "tier": template["tier"],
