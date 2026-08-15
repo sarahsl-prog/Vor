@@ -368,14 +368,16 @@ class TestRunScheduledSweep:
     def test_enqueues_each_selected_target_and_returns_their_identity_keys(
         self, fake_firestore
     ):
-        # Use instances with identity_key components that don't have
-        # underscores, avoiding the known gap (test_known_gaps.py) where
-        # doc.id.split("_") breaks when components contain underscores.
-        # The fix for that gap is out of scope for this task.
+        # detection_rule_id deliberately contains underscores — this used
+        # to break _fetch_all_suppressed_patterns()'s doc.id.split("_")
+        # reconstruction (see test_known_gaps.py, now fixed by storing
+        # identity_key as a Firestore field instead of parsing the doc
+        # ID). Left in place on purpose so this test would catch a
+        # regression back to the old scheme.
         # Vary host, user, and timestamp to meet evidence_diversity_score threshold.
         instances = [
             {
-                "detection_rule_id": "TestRule",
+                "detection_rule_id": "Test_Rule_With_Underscores",
                 "parent_image": "parentexe",
                 "child_image": "childexe",
                 "endpoint_family": "testfamily",
@@ -390,7 +392,7 @@ class TestRunScheduledSweep:
                 "instance_id": "i1",
             },
             {
-                "detection_rule_id": "TestRule",
+                "detection_rule_id": "Test_Rule_With_Underscores",
                 "parent_image": "parentexe",
                 "child_image": "childexe",
                 "endpoint_family": "testfamily",
@@ -405,7 +407,7 @@ class TestRunScheduledSweep:
                 "instance_id": "i2",
             },
             {
-                "detection_rule_id": "TestRule",
+                "detection_rule_id": "Test_Rule_With_Underscores",
                 "parent_image": "parentexe",
                 "child_image": "childexe",
                 "endpoint_family": "testfamily",
@@ -431,7 +433,7 @@ class TestRunScheduledSweep:
 
         result = run_scheduled_sweep(fake_firestore, fake_enqueue)
 
-        expected_key = ("TestRule", "parentexe", "childexe", "testfamily")
+        expected_key = ("Test_Rule_With_Underscores", "parentexe", "childexe", "testfamily")
         assert result == [expected_key]
         assert enqueued_calls == [expected_key]
 
@@ -447,4 +449,28 @@ class TestRunScheduledSweep:
 
     def test_no_confirmed_patterns_enqueues_nothing(self, fake_firestore):
         result = run_scheduled_sweep(fake_firestore, lambda identity_key, pattern_data: True)
+        assert result == []
+
+    def test_doc_missing_identity_key_field_is_skipped_not_crashed(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        """
+        A confirmed-tier doc written before the identity_key-field fix
+        (docs/TODO-Aug15.md Task 3) has no identity_key field at all. This
+        must be skipped defensively, not crash the whole sweep — same
+        "unassessed/malformed defaults to skip, log, keep going" pattern
+        already used for confirmed-tier docs with an empty
+        confirmed_instances list a few lines above in the real code.
+        """
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        # Simulate a pre-migration doc by deleting the identity_key field
+        # Firestore-side, directly through the fake's underlying store.
+        collection = fake_firestore._collections["confidence_docs"]
+        for doc_id in collection:
+            del collection[doc_id]["identity_key"]
+
+        result = run_scheduled_sweep(fake_firestore, lambda identity_key, pattern_data: True)
+
         assert result == []

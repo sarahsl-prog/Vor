@@ -353,6 +353,22 @@ def _fetch_all_suppressed_patterns(firestore_client) -> list[dict]:
         if not instances:
             continue  # confirmed tier with no instances shouldn't occur, but skip defensively
 
+        # Read the identity_key field written by record_confirmed_negative
+        # / seed_template rather than parsing doc.id — doc IDs are now
+        # content hashes (see enrichment._doc_id's docstring) and never
+        # reversible. A doc predating this fix (or otherwise missing the
+        # field) is skipped defensively rather than crashing the whole
+        # sweep on one bad/legacy document; see docs/TODO-Aug15.md Task 3
+        # for the one-time migration this implies for any pre-existing
+        # Firestore data.
+        identity_key_field = data.get("identity_key")
+        if not identity_key_field:
+            logger.bind(doc_id=doc.id).warning(
+                "Confirmed-tier doc missing identity_key field, skipping "
+                "(pre-migration doc?)"
+            )
+            continue
+
         last_reviewed_at = data.get("last_reviewed_at")
         if last_reviewed_at:
             reviewed_dt = datetime.fromisoformat(last_reviewed_at)
@@ -361,7 +377,7 @@ def _fetch_all_suppressed_patterns(firestore_client) -> list[dict]:
             days_since = 9999  # never audited — treat as maximally stale
 
         patterns.append({
-            "identity_key": tuple(doc.id.split("_")),
+            "identity_key": tuple(identity_key_field),
             "days_since_last_review": days_since,
             "evidence_diversity_score": evidence_diversity_score(instances),
             # Worst case across ALL instances, not just the first —
