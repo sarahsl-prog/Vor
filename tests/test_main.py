@@ -103,6 +103,25 @@ def test_classify_returns_result_even_if_enqueue_fails(fake_firestore, monkeypat
     assert resp.json()["decision"] == "SUPPRESS"
 
 
+def test_classify_returns_result_even_if_task_env_var_missing(fake_firestore, monkeypatch):
+    """_enqueue() must never raise, even on a deploy misconfiguration —
+    a missing env var is not the caller's fault and must not cost them
+    their classification result."""
+    for key, value in TASK_ENV.items():
+        if key != "TASKS_OIDC_SA_EMAIL":
+            monkeypatch.setenv(key, value)
+    monkeypatch.delenv("TASKS_OIDC_SA_EMAIL", raising=False)
+    identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
+        client = TestClient(main.app)
+        resp = client.post("/classify", json={"detection_rule_id": "rule"})
+
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "SUPPRESS"
+
+
 def test_sweep_returns_enqueued_count(fake_firestore):
     with patch("main.get_firestore_client", return_value=fake_firestore), \
          patch("main.run_scheduled_sweep", return_value=[("a",), ("b",), ("c",)]):
@@ -134,3 +153,27 @@ def test_audit_endpoint_invokes_audit_pattern(fake_firestore):
     mock_audit.assert_called_once()
     assert mock_audit.call_args[0][0] == tuple(identity_key)
     assert mock_audit.call_args[0][1] == {"triggered_by": "test"}
+
+
+def test_audit_endpoint_rejects_missing_identity_key(fake_firestore):
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/audit", json={"pattern_data": {"triggered_by": "test"}})
+
+    assert resp.status_code == 422
+
+
+def test_audit_endpoint_rejects_missing_pattern_data(fake_firestore):
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/audit", json={"identity_key": ["a", "b"]})
+
+    assert resp.status_code == 422
+
+
+def test_audit_endpoint_rejects_non_json_body(fake_firestore):
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/audit", content=b"not json", headers={"content-type": "application/json"})
+
+    assert resp.status_code == 422

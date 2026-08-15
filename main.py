@@ -27,6 +27,7 @@ from google.cloud import firestore, tasks_v2
 from loguru import logger
 
 from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
+from vor_agents.schemas import AuditRequest
 from vor_agents.task_queue import AuditEnqueueError, enqueue_audit
 
 app = FastAPI(title="Vör")
@@ -78,9 +79,9 @@ def _enqueue(identity_key: tuple, pattern_data: dict) -> bool:
             _audit_url(),
             os.environ["TASKS_OIDC_SA_EMAIL"],
         )
-    except AuditEnqueueError:
+    except (AuditEnqueueError, KeyError) as exc:
         logger.bind(identity_key=identity_key).error(
-            "Audit enqueue failed; caller's response is unaffected"
+            "Audit enqueue failed ({}); caller's response is unaffected", repr(exc)
         )
         return False
 
@@ -117,17 +118,21 @@ async def sweep(request: Request):
 
 
 @app.post("/audit")
-async def audit(request: Request):
+async def audit(payload: AuditRequest):
     """
     Reached exclusively via a Cloud Tasks dispatch — never called
     directly by /classify or /sweep. This is the one place
     audit_pattern() actually runs, inside its own fully-CPU-allocated
     request. Gated by Cloud Run IAM the same way /sweep is (OIDC,
     never --allow-unauthenticated) — no manual token check needed here.
+
+    payload is validated by FastAPI/pydantic before this body runs — a
+    malformed or truncated body (Cloud Tasks retrying a stale/corrupted
+    task, or a bug in task_queue.py's construction) returns 422 rather
+    than an unhandled KeyError-turned-500, so it fails predictably
+    instead of burning Cloud Tasks' retry budget on a payload that can
+    never succeed.
     """
-    payload = await request.json()
-    identity_key = tuple(payload["identity_key"])
-    pattern_data = payload["pattern_data"]
     client = get_firestore_client()
-    decision = await audit_pattern(identity_key, pattern_data, client)
+    decision = await audit_pattern(tuple(payload.identity_key), payload.pattern_data, client)
     return decision.model_dump()
