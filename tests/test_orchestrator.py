@@ -52,7 +52,6 @@ class TestReconciliation:
             "uncertain_reason": "not_applicable",
             "structural_deviations_found": [],
             "reasoning": "No deviations found, template matches.",
-            "confidence_used": None,
         }
         with patch(
             "vor_agents.orchestrator._run_agent",
@@ -78,7 +77,6 @@ class TestReconciliation:
             "uncertain_reason": "not_applicable",
             "structural_deviations_found": [],  # model reported nothing
             "reasoning": "Looks fine to me.",
-            "confidence_used": 0.9,
         }
         with patch(
             "vor_agents.orchestrator._run_agent",
@@ -105,7 +103,6 @@ class TestReconciliation:
             "uncertain_reason": "not_applicable",
             "structural_deviations_found": ["some_field: template=X, observed=Y"],
             "reasoning": "This looks suspicious for reasons beyond the diffed fields.",
-            "confidence_used": None,
         }
         with patch(
             "vor_agents.orchestrator._run_agent",
@@ -128,7 +125,6 @@ class TestReconciliation:
             "uncertain_reason": "no_history",
             "structural_deviations_found": [],
             "reasoning": "No prior history for this pattern.",
-            "confidence_used": None,
         }
         with patch(
             "vor_agents.orchestrator._run_agent",
@@ -172,7 +168,6 @@ class TestSelfConsistency:
             "uncertain_reason": "not_applicable",
             "structural_deviations_found": ["integrity_level: template=Medium, observed=High"],
             "reasoning": "Reported a deviation but suppressed anyway.",
-            "confidence_used": 0.9,
         }
         with patch(
             "vor_agents.orchestrator._run_agent",
@@ -196,7 +191,6 @@ class TestSelfConsistency:
             "uncertain_reason": "not_applicable",
             "structural_deviations_found": ["integrity_level: template=Medium, observed=High"],
             "reasoning": "Deviation found, escalating as instructed.",
-            "confidence_used": None,
         }
         with patch(
             "vor_agents.orchestrator._run_agent",
@@ -267,7 +261,6 @@ class TestUnderReviewBlocksSuppress:
             "uncertain_reason": "not_applicable",
             "structural_deviations_found": [],
             "reasoning": "Matches template.",
-            "confidence_used": 0.9,
         }
         with patch(
             "vor_agents.orchestrator._run_agent",
@@ -295,7 +288,6 @@ class TestUnderReviewBlocksSuppress:
             "uncertain_reason": "not_applicable",
             "structural_deviations_found": [],
             "reasoning": "Escalating out of caution.",
-            "confidence_used": None,
         }
         with patch(
             "vor_agents.orchestrator._run_agent",
@@ -327,7 +319,6 @@ class TestSessionUniqueness:
             "uncertain_reason": "no_history",
             "structural_deviations_found": [],
             "reasoning": "No prior history for this pattern.",
-            "confidence_used": None,
         }
         mock_run_agent = AsyncMock(return_value=fake_model_response)
         with patch("vor_agents.orchestrator._run_agent", new=mock_run_agent):
