@@ -58,6 +58,53 @@ class TestRecordConfirmedNegative:
         assert "instance_id" in instances[0]
         assert instances[0]["instance_id"] is not None
 
+    def test_human_confirmed_true_tags_instance_verified_by_human(
+        self, fake_firestore, baseline_alert
+    ):
+        """human_confirmed was previously accepted but silently ignored —
+        every instance looked identically trusted regardless of how it was
+        confirmed. Default (True) must now tag the instance accordingly."""
+        record_confirmed_negative(baseline_alert, fake_firestore)
+
+        from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+        from vor_agents.identity import pattern_identity_key
+        key = pattern_identity_key(baseline_alert)
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
+        instances = doc.to_dict()["confirmed_instances"]
+        assert instances[0]["verified_by"] == "human"
+
+    def test_human_confirmed_false_tags_instance_verified_by_bulk(
+        self, fake_firestore, baseline_alert
+    ):
+        record_confirmed_negative(baseline_alert, fake_firestore, human_confirmed=False)
+
+        from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+        from vor_agents.identity import pattern_identity_key
+        key = pattern_identity_key(baseline_alert)
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
+        instances = doc.to_dict()["confirmed_instances"]
+        assert instances[0]["verified_by"] == "bulk"
+
+    def test_verified_by_is_per_instance_not_clobbered_by_later_calls(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        """The whole reason verified_by is tagged per-instance rather than
+        as a doc-level field: confirmed_instances accumulates across many
+        calls, and a doc-level field would silently mislabel every earlier
+        instance with whichever call happened last."""
+        first, *rest = diverse_confirmed_instances
+        record_confirmed_negative(first, fake_firestore, human_confirmed=True)
+        for instance in rest:
+            record_confirmed_negative(instance, fake_firestore, human_confirmed=False)
+
+        from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+        from vor_agents.identity import pattern_identity_key
+        key = pattern_identity_key(first)
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
+        instances = doc.to_dict()["confirmed_instances"]
+        assert instances[0]["verified_by"] == "human"
+        assert all(inst["verified_by"] == "bulk" for inst in instances[1:])
+
 
 class TestSeedTemplate:
     def test_seed_batch_meeting_threshold_enters_confirmed(
@@ -87,6 +134,20 @@ class TestSeedTemplate:
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
         stored = doc.to_dict()["confirmed_instances"]
         assert all("instance_id" in inst and inst["instance_id"] for inst in stored)
+
+    def test_seeded_instances_tagged_verified_by_bulk(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        """No per-alert human signed off on a seeded batch, regardless of
+        how trustworthy the source dataset is — same "bulk" tag as
+        record_confirmed_negative(human_confirmed=False)."""
+        key = ("rule", "w3wp.exe", "csc.exe", "family")
+        seed_template(key, diverse_confirmed_instances, fake_firestore)
+
+        from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
+        stored = doc.to_dict()["confirmed_instances"]
+        assert all(inst["verified_by"] == "bulk" for inst in stored)
 
 
 class TestInvalidateInstances:

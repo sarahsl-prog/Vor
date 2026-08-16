@@ -26,6 +26,18 @@ TASK_ENV = {
 }
 
 
+def _full_alert():
+    """Minimal alert satisfying ClassifierRequest's four required
+    identity fields. classify_alert is mocked in every test below, so
+    only the shape (not the content) needs to pass validation."""
+    return {
+        "detection_rule_id": "rule",
+        "parent_image": "w3wp.exe",
+        "child_image": "csc.exe",
+        "endpoint_family": "family",
+    }
+
+
 def _suppress_result():
     return ClassifierOutput(
         decision=Decision.SUPPRESS,
@@ -33,7 +45,6 @@ def _suppress_result():
         uncertain_reason=UncertainReason.NOT_APPLICABLE,
         structural_deviations_found=[],
         reasoning="matches template",
-        confidence_used=0.9,
     )
 
 
@@ -53,7 +64,7 @@ def test_classify_enqueues_audit_task_on_suppress(fake_firestore, fake_tasks_cli
          patch("main.get_tasks_client", return_value=fake_tasks_client), \
          patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
-        resp = client.post("/classify", json={"detection_rule_id": "rule"})
+        resp = client.post("/classify", json=_full_alert())
 
     assert resp.status_code == 200
     assert resp.json()["decision"] == "SUPPRESS"
@@ -73,8 +84,8 @@ def test_classify_does_not_enqueue_second_task_for_same_pattern(
          patch("main.get_tasks_client", return_value=fake_tasks_client), \
          patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
-        client.post("/classify", json={"detection_rule_id": "rule"})
-        client.post("/classify", json={"detection_rule_id": "rule"})
+        client.post("/classify", json=_full_alert())
+        client.post("/classify", json=_full_alert())
 
     assert len(fake_tasks_client.created_tasks) == 1
 
@@ -97,7 +108,7 @@ def test_classify_returns_result_even_if_enqueue_fails(fake_firestore, monkeypat
          patch("main.get_tasks_client", return_value=_BoomTasksClient()), \
          patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
-        resp = client.post("/classify", json={"detection_rule_id": "rule"})
+        resp = client.post("/classify", json=_full_alert())
 
     assert resp.status_code == 200
     assert resp.json()["decision"] == "SUPPRESS"
@@ -127,7 +138,7 @@ def test_classify_returns_result_even_if_task_env_var_missing(
          patch("main.get_tasks_client", return_value=fake_tasks_client), \
          patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
         client = TestClient(main.app)
-        resp = client.post("/classify", json={"detection_rule_id": "rule"})
+        resp = client.post("/classify", json=_full_alert())
 
     assert resp.status_code == 200
     assert resp.json()["decision"] == "SUPPRESS"
@@ -141,6 +152,34 @@ def test_sweep_returns_enqueued_count(fake_firestore):
 
     assert resp.status_code == 200
     assert resp.json() == {"enqueued": 3}
+
+
+def test_sweep_returns_result_if_enqueue_misconfigured(
+    fake_firestore, fake_tasks_client, monkeypatch, diverse_confirmed_instances
+):
+    """/sweep must never 500 on a deploy misconfiguration (missing env
+    var) — same guarantee /classify already has via _enqueue's own
+    try/except, exercised here through the real run_scheduled_sweep ->
+    _enqueue path instead of a mock, with an actual confirmed pattern in
+    Firestore so there's a real target to (fail to) enqueue."""
+    from vor_agents.enrichment import record_confirmed_negative
+
+    for key, value in TASK_ENV.items():
+        if key != "TASKS_OIDC_SA_EMAIL":
+            monkeypatch.setenv(key, value)
+    monkeypatch.delenv("TASKS_OIDC_SA_EMAIL", raising=False)
+
+    for instance in diverse_confirmed_instances:
+        record_confirmed_negative(instance, fake_firestore)
+
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch("main.get_tasks_client", return_value=fake_tasks_client):
+        client = TestClient(main.app)
+        resp = client.post("/sweep", json={})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"enqueued": 0}
+    assert len(fake_tasks_client.created_tasks) == 0
 
 
 def test_audit_endpoint_invokes_audit_pattern(fake_firestore):
@@ -188,3 +227,105 @@ def test_audit_endpoint_rejects_non_json_body(fake_firestore):
         resp = client.post("/audit", content=b"not json", headers={"content-type": "application/json"})
 
     assert resp.status_code == 422
+
+
+def test_audit_endpoint_returns_422_on_malformed_stored_data(fake_firestore):
+    """Regression coverage: audit_pattern()'s own try/except (Task 1)
+    covers model/parsing failures, but NOT mark_under_review() (before
+    that try block) or the invalidate_instances() rebuild inside
+    clear_under_review() (in its finally block) — a MalformedAlertError
+    raised from stored data missing a DIFFABLE_FIELDS key can still
+    escape audit_pattern(). Must be a 422 (permanent, not worth
+    retrying), not a bare 500."""
+    from vor_agents.identity import MalformedAlertError
+
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch(
+             "main.audit_pattern",
+             new=AsyncMock(side_effect=MalformedAlertError("missing field: integrity_level")),
+         ):
+        client = TestClient(main.app)
+        resp = client.post(
+            "/audit", json={"identity_key": ["a", "b", "c", "d"], "pattern_data": {}}
+        )
+
+    assert resp.status_code == 422
+    assert "integrity_level" in resp.json()["detail"]
+
+
+def test_audit_endpoint_returns_500_on_unexpected_failure(fake_firestore):
+    """A truly unexpected failure (Firestore unavailable, network) is the
+    retryable direction — must stay a 500 so Cloud Tasks retries it,
+    unlike the malformed-data case above."""
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch(
+             "main.audit_pattern",
+             new=AsyncMock(side_effect=RuntimeError("Firestore unavailable")),
+         ):
+        client = TestClient(main.app)
+        resp = client.post(
+            "/audit", json={"identity_key": ["a", "b", "c", "d"], "pattern_data": {}}
+        )
+
+    assert resp.status_code == 500
+
+
+def test_classify_rejects_missing_identity_fields(fake_firestore):
+    """Regression coverage: pattern_identity_key() indexes an alert dict
+    directly (alert["field"]), so a request missing one of the four
+    identity fields previously raised a raw KeyError-turned-500. Must now
+    be a clean 422 from Pydantic/FastAPI request validation, before
+    classify_alert() ever runs."""
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/classify", json={"detection_rule_id": "rule"})
+
+    assert resp.status_code == 422
+
+
+def test_classify_rejects_invalid_json_body(fake_firestore):
+    """Regression coverage: a non-JSON body previously raised an
+    unhandled json.decoder.JSONDecodeError out of `await request.json()`,
+    surfacing as a 500. Switching /classify to a Pydantic body param
+    means FastAPI's own request-parsing layer rejects this before main.py
+    code runs at all."""
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post(
+            "/classify", content=b"not json", headers={"content-type": "application/json"}
+        )
+
+    assert resp.status_code == 422
+
+
+def test_classify_allows_extra_context_fields(
+    fake_firestore, fake_tasks_client, monkeypatch
+):
+    """extra="allow" on ClassifierRequest: fields beyond the four required
+    identity ones (DIFFABLE_FIELDS, host/user/timestamp, or anything an
+    alert schema might add later) must pass through to classify_alert(),
+    not get silently stripped by validation."""
+    for key, value in TASK_ENV.items():
+        monkeypatch.setenv(key, value)
+    identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+    alert_with_extras = {
+        **_full_alert(),
+        "integrity_level": "Medium",
+        "host": "SRV-01",
+    }
+
+    captured_alert = {}
+
+    async def _fake_classify_alert(alert, client):
+        captured_alert.update(alert)
+        return _suppress_result(), identity_key
+
+    with patch("main.get_firestore_client", return_value=fake_firestore), \
+         patch("main.get_tasks_client", return_value=fake_tasks_client), \
+         patch("main.classify_alert", new=_fake_classify_alert):
+        client = TestClient(main.app)
+        resp = client.post("/classify", json=alert_with_extras)
+
+    assert resp.status_code == 200
+    assert captured_alert["integrity_level"] == "Medium"
+    assert captured_alert["host"] == "SRV-01"

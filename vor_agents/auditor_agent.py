@@ -29,8 +29,11 @@ Actively look for:
 - Individual instances that are high in VOLUME but low in DIVERSITY relative
   to the rest of the pool (same host, same user, same time window repeated —
   weak evidence dressed up as strong)
-- Whether a given instance was ever actually confirmed by a human, or just
-  never complained about (absence of complaint is not confirmation)
+- Whether a given instance's verified_by is "human" (a real per-alert
+  sign-off) or "bulk" (confirmed on the pattern's behalf without one, e.g.
+  a batch import or bulk-confirm tool) — "bulk" is not the same as never
+  complained about, but it's weaker evidence than an individual human
+  actually looking at that specific alert, and should weigh accordingly
 - Whether the pattern's overall confidence was inherited from broader/older
   system-wide trust rather than earned by these specific instances
 - Any instance whose structural detail resembles a known attack technique,
