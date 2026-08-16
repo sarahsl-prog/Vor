@@ -461,7 +461,7 @@ class TestRunScheduledSweep:
         self, fake_firestore
     ):
         # detection_rule_id deliberately contains underscores — this used
-        # to break _fetch_all_suppressed_patterns()'s doc.id.split("_")
+        # to break _fetch_all_confirmed_patterns()'s doc.id.split("_")
         # reconstruction (see test_known_gaps.py, now fixed by storing
         # identity_key as a Firestore field instead of parsing the doc
         # ID). Left in place on purpose so this test would catch a

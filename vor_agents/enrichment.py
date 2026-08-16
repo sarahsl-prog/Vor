@@ -27,7 +27,7 @@ def _doc_id(identity_key: tuple) -> str:
     The doc ID no longer needs to be reversible — every write path now
     also stores the identity_key as a first-class array field on the doc
     itself (see record_confirmed_negative / seed_template), and readers
-    that need the tuple back (e.g. _fetch_all_suppressed_patterns) read
+    that need the tuple back (e.g. _fetch_all_confirmed_patterns) read
     that field instead of parsing the ID. json.dumps with sorted
     separators guarantees the same tuple always hashes to the same ID
     regardless of any incidental formatting differences.

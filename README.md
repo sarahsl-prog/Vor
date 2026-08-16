@@ -104,7 +104,7 @@ Both inputs `select_audit_targets()` needed are now real:
   direction that reduces scrutiny, same asymmetry as the auditor's
   DOWNGRADE/RECOMMEND_UPGRADE split).
 
-`_fetch_all_suppressed_patterns()` in `orchestrator.py` is now
+`_fetch_all_confirmed_patterns()` in `orchestrator.py` is now
 implemented using both, plus a `last_reviewed_at` timestamp (newly stamped
 by `clear_under_review()` on every audit outcome, not just downgrades) to
 compute `days_since_last_review`. Never-audited patterns get a large
@@ -193,7 +193,7 @@ identity_key tuple instead of joining it with `"_"`, and every write path
 stores `identity_key` as its own Firestore field; readers use that field
 instead of parsing the doc ID. See `docs/TODO-Aug15.md` Task 3. Existing
 Firestore data written before this change won't have the `identity_key`
-field — `_fetch_all_suppressed_patterns()` skips and logs a warning for
+field — `_fetch_all_confirmed_patterns()` skips and logs a warning for
 any doc missing it rather than crashing, but a one-time migration/backfill
 is still needed before this matters in a real deployment.)
 
