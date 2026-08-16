@@ -163,6 +163,21 @@ strategy per identity key is the likely fix once that data exists.
 **Also not resolved**: `/classify` has no actual trigger source wired up
 yet — nothing currently calls it. See DEPLOY.md step 4.
 
+## Model backend — resolved: Vertex AI, not the Gemini API key
+Both agents just pass a plain model string (`model="gemini-2.0-flash"`)
+to ADK's `Agent` — no explicit client construction in
+`classifier_agent.py`/`auditor_agent.py`. Backend selection is entirely
+environment-variable-driven, read by `google-genai` (an ADK dependency):
+`GOOGLE_GENAI_USE_VERTEXAI=true` + `GOOGLE_CLOUD_PROJECT` +
+`GOOGLE_CLOUD_LOCATION` route through Vertex AI using the caller's
+Application Default Credentials; their absence (with `GOOGLE_API_KEY`
+set instead) falls back to the Gemini Developer API. `.env` and
+`DEPLOY.md` are both configured for Vertex AI — matches "meant to be run
+in Google Cloud" from `CLAUDE.md`, and means the Cloud Run service
+authenticates to the model as itself (its own service account, granted
+`roles/aiplatform.user` — see DEPLOY.md step 3a) rather than carrying a
+separate API key as a secret to manage and rotate.
+
 ## Precomputed deviations — resolved: asymmetric reconciliation
 `precomputed_deviations` is no longer computed-and-discarded. After the
 classifier agent returns, its reported deviations are compared against
