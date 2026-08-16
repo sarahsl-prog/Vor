@@ -136,7 +136,7 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
     endpoint) that wants to trigger an audit off a SUPPRESS decision needs
     a real identity key to hand to audit_pattern() — reconstructing one by
     parsing LLM-generated text would repeat the same fragile-split problem
-    already flagged for _fetch_all_suppressed_patterns(), just one layer
+    already flagged for _fetch_all_confirmed_patterns(), just one layer
     less reliable since it would also depend on the model formatting that
     string consistently.
     """
@@ -350,8 +350,8 @@ def run_scheduled_sweep(
     config specifics (queue path, audit URL, OIDC service account) any
     more than it needs to know how firestore_client was constructed.
     """
-    all_suppressed = _fetch_all_suppressed_patterns(firestore_client)
-    targets = select_audit_targets(all_suppressed, max_targets=max_targets)
+    all_confirmed = _fetch_all_confirmed_patterns(firestore_client)
+    targets = select_audit_targets(all_confirmed, max_targets=max_targets)
 
     enqueued = []
     for pattern in targets:
@@ -361,11 +361,21 @@ def run_scheduled_sweep(
     return enqueued
 
 
-def _fetch_all_suppressed_patterns(firestore_client) -> list[dict]:
+def _fetch_all_confirmed_patterns(firestore_client) -> list[dict]:
     """
     Queries CONFIDENCE_COLLECTION for tier == "confirmed" docs and shapes
     them into what select_audit_targets() expects: days_since_last_review,
     evidence_diversity_score, blast_radius_estimate, identity_key.
+
+    Confirmed-tier only, deliberately — this was previously named
+    _fetch_all_suppressed_patterns(), which implied it covered every
+    autonomously-suppressed pattern including provisional ones. It never
+    did (provisional was never queried), and it doesn't need to:
+    CLASSIFIER_SYSTEM_PROMPT rule 6 (classifier_agent.py) never lets a
+    provisional-tier pattern autonomously SUPPRESS in the first place —
+    it always resolves to UNCERTAIN. The sweep exists to catch stale
+    evidence behind an autonomous SUPPRESS going unnoticed; a tier that
+    never produces one has nothing for it to catch.
 
     days_since_last_review: computed from last_reviewed_at (stamped by
     clear_under_review() on every audit, not just downgrades). A pattern

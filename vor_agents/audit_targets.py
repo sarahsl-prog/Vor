@@ -19,7 +19,7 @@ def select_audit_targets(all_suppressed_patterns: list[dict], max_targets: int =
     plus an "identity_key" tuple/string for downstream lookup.
 
     days_since_last_review is clamped to >= 0 here too (not just at the
-    _fetch_all_suppressed_patterns call site that normally produces it) —
+    _fetch_all_confirmed_patterns call site that normally produces it) —
     this function's own contract shouldn't depend on every caller already
     having sanitized its input. A negative value (clock skew: a
     last_reviewed_at timestamp in the future) would otherwise pull a
