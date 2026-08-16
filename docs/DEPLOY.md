@@ -86,12 +86,33 @@ need, on the Cloud Run service itself:
 ```bash
 gcloud run services update vor \
   --region us-central1 \
-  --set-env-vars "GCP_PROJECT=YOUR_PROJECT_ID,TASKS_LOCATION=us-central1,TASKS_QUEUE=vor-audit-queue,TASKS_OIDC_SA_EMAIL=vor-scheduler@YOUR_PROJECT_ID.iam.gserviceaccount.com,SERVICE_URL=https://YOUR_CLOUD_RUN_URL"
+  --set-env-vars "GCP_PROJECT=YOUR_PROJECT_ID,TASKS_LOCATION=us-central1,TASKS_QUEUE=vor-audit-queue,TASKS_OIDC_SA_EMAIL=vor-scheduler@YOUR_PROJECT_ID.iam.gserviceaccount.com,SERVICE_URL=https://YOUR_CLOUD_RUN_URL,GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID,GOOGLE_CLOUD_LOCATION=us-central1"
 ```
 
 `/audit` must never be deployed with `--allow-unauthenticated`, same as
 `/classify` and `/sweep` — it's reached exclusively via Cloud Tasks'
 OIDC-authenticated dispatch.
+
+The `GOOGLE_GENAI_USE_VERTEXAI`/`GOOGLE_CLOUD_PROJECT`/`GOOGLE_CLOUD_LOCATION`
+trio is what `classifier_agent.py`/`auditor_agent.py` actually run
+against — no code change needed, `google-genai` (an ADK dependency) reads
+these directly. No API key involved: the Cloud Run service authenticates
+to Vertex AI as itself, via its own service account's Application Default
+Credentials, same identity model as every other GCP call this service
+already makes (Firestore, Cloud Tasks). That service account needs the
+Vertex AI role granted:
+
+```bash
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member "serviceAccount:YOUR_CLOUD_RUN_SERVICE_ACCOUNT" \
+  --role "roles/aiplatform.user"
+```
+
+`YOUR_CLOUD_RUN_SERVICE_ACCOUNT` here is the Cloud Run service's own
+runtime identity (the default compute service account unless `--service-
+account` was passed in step 1), not `vor-scheduler` — that one is only
+for invoking this service and enqueueing Cloud Tasks, unrelated to what
+this service calls outward to Vertex AI.
 
 ## 4. The `/classify` endpoint itself
 
