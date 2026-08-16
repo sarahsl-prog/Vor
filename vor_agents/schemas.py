@@ -43,7 +43,6 @@ class ClassifierOutput(BaseModel):
         "not just the first. Format: 'field_name: template=X, observed=Y'.",
     )
     reasoning: str
-    confidence_used: float | None = None
 
 
 class ClassifierRequest(BaseModel):

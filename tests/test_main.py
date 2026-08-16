@@ -45,7 +45,6 @@ def _suppress_result():
         uncertain_reason=UncertainReason.NOT_APPLICABLE,
         structural_deviations_found=[],
         reasoning="matches template",
-        confidence_used=0.9,
     )
 
 
