@@ -856,3 +856,124 @@ class TestRunScheduledSweep:
         result = run_scheduled_sweep(fake_firestore, lambda identity_key, pattern_data: True)
 
         assert result == []
+
+
+@pytest.mark.asyncio
+class TestTracingWiring:
+    """
+    classify_alert()/audit_pattern() call the tracing functions exactly
+    once per call, with overrides_fired/audit_failed populated correctly.
+    mlflow itself is monkeypatched to the success fake from
+    test_tracing.py's pattern -- these tests only check that orchestrator
+    calls into tracing.py correctly, not tracing.py's own fallback
+    behavior (already covered in tests/test_tracing.py).
+    """
+
+    async def test_classify_alert_logs_a_trace_with_no_overrides_on_a_clean_suppress(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances, monkeypatch
+    ):
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        async def _fake_run_agent(*args, **kwargs):
+            return {
+                "decision": "SUPPRESS",
+                "matched_pattern_id": "test",
+                "uncertain_reason": "not_applicable",
+                "structural_deviations_found": [],
+                "reasoning": "matches template",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _fake_run_agent)
+        captured = {}
+
+        def _fake_log_classification_trace(
+            alert, enrichment, classifier_output, overrides_fired, client
+        ):
+            captured["overrides_fired"] = overrides_fired
+
+        monkeypatch.setattr(
+            "vor_agents.orchestrator.log_classification_trace", _fake_log_classification_trace
+        )
+
+        await classify_alert(baseline_alert, fake_firestore)
+
+        assert captured["overrides_fired"] == []
+
+    async def test_classify_alert_logs_under_review_override(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances, monkeypatch
+    ):
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        identity_key = pattern_identity_key(baseline_alert)
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).set(
+            {"under_review": True}, merge=True
+        )
+
+        async def _fake_run_agent(*args, **kwargs):
+            return {
+                "decision": "SUPPRESS",
+                "matched_pattern_id": "test",
+                "uncertain_reason": "not_applicable",
+                "structural_deviations_found": [],
+                "reasoning": "matches template",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _fake_run_agent)
+        captured = {}
+
+        def _fake_log_classification_trace(
+            alert, enrichment, classifier_output, overrides_fired, client
+        ):
+            captured["overrides_fired"] = overrides_fired
+
+        monkeypatch.setattr(
+            "vor_agents.orchestrator.log_classification_trace", _fake_log_classification_trace
+        )
+
+        await classify_alert(baseline_alert, fake_firestore)
+
+        assert captured["overrides_fired"] == ["under_review"]
+
+    async def test_audit_pattern_logs_a_trace(self, fake_firestore, monkeypatch):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        async def _ok(*args, **kwargs):
+            return {
+                "action": "NO_ACTION",
+                "invalidated_instance_ids": [],
+                "concerns_found": [],
+                "reasoning": "clean",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _ok)
+        captured = {}
+
+        def _fake_log_audit_trace(ident_key, pattern_data, auditor_output, audit_failed, client):
+            captured["audit_failed"] = audit_failed
+
+        monkeypatch.setattr("vor_agents.orchestrator.log_audit_trace", _fake_log_audit_trace)
+
+        await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+        assert captured["audit_failed"] is False
+
+    async def test_audit_pattern_logs_audit_failed_true_on_failure(
+        self, fake_firestore, monkeypatch
+    ):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("model call failed")
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _boom)
+        captured = {}
+
+        def _fake_log_audit_trace(ident_key, pattern_data, auditor_output, audit_failed, client):
+            captured["audit_failed"] = audit_failed
+
+        monkeypatch.setattr("vor_agents.orchestrator.log_audit_trace", _fake_log_audit_trace)
+
+        await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+        assert captured["audit_failed"] is True

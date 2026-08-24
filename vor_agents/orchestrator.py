@@ -38,6 +38,7 @@ from .schemas import (
     Decision,
     UncertainReason,
 )
+from .tracing import log_audit_trace, log_classification_trace
 
 session_service = InMemorySessionService()  # swap for a persistent
 # SessionService in production;
@@ -158,6 +159,7 @@ async def classify_alert(
     string consistently.
     """
     enrichment = enrich(alert, firestore_client)
+    overrides_fired: list[str] = []
 
     precomputed_deviations = []
     if enrichment["status"] == "TEMPLATE":
@@ -191,16 +193,15 @@ async def classify_alert(
         # No reconciliation to run below: there's no classifier_output to
         # reconcile against.
         logger.bind(identity_key=identity_key).error("Classifier output unparseable: {}", exc)
-        return (
-            ClassifierOutput(
-                decision=Decision.UNCERTAIN,
-                matched_pattern_id=None,
-                uncertain_reason=UncertainReason.MISSING_DATA,
-                structural_deviations_found=[],
-                reasoning=f"Classifier returned unparseable output: {exc}",
-            ),
-            identity_key,
+        unparseable_result = ClassifierOutput(
+            decision=Decision.UNCERTAIN,
+            matched_pattern_id=None,
+            uncertain_reason=UncertainReason.MISSING_DATA,
+            structural_deviations_found=[],
+            reasoning=f"Classifier returned unparseable output: {exc}",
         )
+        log_classification_trace(alert, enrichment, unparseable_result, [], firestore_client)
+        return (unparseable_result, identity_key)
 
     if enrichment.get("under_review") and classifier_output.decision == "SUPPRESS":
         # The classifier prompt already tells the model to treat
@@ -224,6 +225,7 @@ async def classify_alert(
                 ),
             }
         )
+        overrides_fired.append("under_review")
 
     if enrichment.get("tier") == "provisional" and classifier_output.decision == "SUPPRESS":
         # Same shape and same reasoning as the under_review override just
@@ -250,6 +252,7 @@ async def classify_alert(
                 ),
             }
         )
+        overrides_fired.append("provisional_tier")
 
     if (
         enrichment.get("failure_count", 0) >= AUDIT_FAILURE_ESCALATION_THRESHOLD
@@ -274,6 +277,7 @@ async def classify_alert(
                 ),
             }
         )
+        overrides_fired.append("audit_failing")
 
     if precomputed_deviations:
         precomputed_fields = _deviation_field_names(precomputed_deviations)
@@ -302,6 +306,7 @@ async def classify_alert(
                     ),
                 }
             )
+            overrides_fired.append("ground_truth_missed")
         # The reverse case (model reported a deviation ground truth didn't
         # find) is deliberately NOT overridden — the model being more
         # cautious than the deterministic check is the safe direction and
@@ -331,7 +336,11 @@ async def classify_alert(
                 ),
             }
         )
+        overrides_fired.append("self_consistency_deviation")
 
+    log_classification_trace(
+        alert, enrichment, classifier_output, overrides_fired, firestore_client
+    )
     return classifier_output, identity_key
 
 
@@ -444,6 +453,7 @@ async def audit_pattern(
                 "Failed to resolve needs_attention doc: {}", resolve_exc
             )
 
+    log_audit_trace(identity_key, pattern_data, decision, audit_failed, firestore_client)
     return decision
 
 
