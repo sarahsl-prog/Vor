@@ -53,11 +53,21 @@ def diverse_confirmed_instances():
     score high on evidence_diversity_score. Meets GRADUATION_THRESHOLD
     (3) with room to spare."""
     return [
-        _instance({"host": "SRV-SP-01", "user": "jsmith", "timestamp": "2026-08-01T09:00:00Z"}, "i1"),
-        _instance({"host": "SRV-SP-02", "user": "mjones", "timestamp": "2026-08-03T14:00:00Z"}, "i2"),
-        _instance({"host": "SRV-SP-03", "user": "kwhite", "timestamp": "2026-08-05T22:00:00Z"}, "i3"),
-        _instance({"host": "SRV-SP-01", "user": "abrown", "timestamp": "2026-08-07T03:00:00Z"}, "i4"),
-        _instance({"host": "SRV-SP-04", "user": "jsmith", "timestamp": "2026-08-09T09:00:00Z"}, "i5"),
+        _instance(
+            {"host": "SRV-SP-01", "user": "jsmith", "timestamp": "2026-08-01T09:00:00Z"}, "i1"
+        ),
+        _instance(
+            {"host": "SRV-SP-02", "user": "mjones", "timestamp": "2026-08-03T14:00:00Z"}, "i2"
+        ),
+        _instance(
+            {"host": "SRV-SP-03", "user": "kwhite", "timestamp": "2026-08-05T22:00:00Z"}, "i3"
+        ),
+        _instance(
+            {"host": "SRV-SP-01", "user": "abrown", "timestamp": "2026-08-07T03:00:00Z"}, "i4"
+        ),
+        _instance(
+            {"host": "SRV-SP-04", "user": "jsmith", "timestamp": "2026-08-09T09:00:00Z"}, "i5"
+        ),
     ]
 
 
@@ -67,9 +77,15 @@ def low_diversity_confirmed_instances():
     GRADUATION_THRESHOLD count but should FAIL MIN_DIVERSITY. This is the
     exact case the two-part gate was built to catch."""
     return [
-        _instance({"host": "SRV-SP-01", "user": "jsmith", "timestamp": "2026-08-01T09:00:00Z"}, "i1"),
-        _instance({"host": "SRV-SP-01", "user": "jsmith", "timestamp": "2026-08-01T09:05:00Z"}, "i2"),
-        _instance({"host": "SRV-SP-01", "user": "jsmith", "timestamp": "2026-08-01T09:12:00Z"}, "i3"),
+        _instance(
+            {"host": "SRV-SP-01", "user": "jsmith", "timestamp": "2026-08-01T09:00:00Z"}, "i1"
+        ),
+        _instance(
+            {"host": "SRV-SP-01", "user": "jsmith", "timestamp": "2026-08-01T09:05:00Z"}, "i2"
+        ),
+        _instance(
+            {"host": "SRV-SP-01", "user": "jsmith", "timestamp": "2026-08-01T09:12:00Z"}, "i3"
+        ),
     ]
 
 
@@ -168,10 +184,7 @@ class _FakeCollection:
         # Minimal support for the one query orchestrator.py actually uses:
         # .where("tier", "==", "confirmed")
         assert op == "=="
-        matches = {
-            doc_id: data for doc_id, data in self._store.items()
-            if data.get(field) == value
-        }
+        matches = {doc_id: data for doc_id, data in self._store.items() if data.get(field) == value}
         return _FakeQuery(matches)
 
 
@@ -194,6 +207,7 @@ class FakeFirestoreClient:
     full Firestore emulator — tests should never need real GCP credentials
     or network access to run.
     """
+
     def __init__(self):
         self._collections: dict[str, dict] = {}
 
@@ -222,6 +236,7 @@ class FakeTasksClient:
     Tasks emulator — tests should never need real GCP credentials or
     network access to run.
     """
+
     def __init__(self):
         self.created_tasks: dict[str, dict] = {}
 

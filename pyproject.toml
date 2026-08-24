@@ -1,0 +1,41 @@
+[project]
+name = "vor"
+version = "0.1.0"
+description = "Self-tuning confidence layer for Windows Event Log / Hayabusa-style alert triage"
+requires-python = ">=3.13"
+
+[tool.black]
+line-length = 100
+target-version = ['py313']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+    .venv
+  | venv
+  | .pytest_cache
+  | .ruff_cache
+  | __pycache__
+)/
+'''
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_ignores = true
+show_error_codes = true
+exclude = [
+    "^.venv/",
+    "^tests/",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+skips = ["B101"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+pythonpath = ["."]

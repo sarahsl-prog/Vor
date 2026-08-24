@@ -19,7 +19,10 @@ class TestPatternIdentityKey:
     def test_returns_four_tuple(self, baseline_alert):
         key = pattern_identity_key(baseline_alert)
         assert key == (
-            "SharePoint_ToolPane_Rule", "w3wp.exe", "csc.exe", "ToolPane_admin",
+            "SharePoint_ToolPane_Rule",
+            "w3wp.exe",
+            "csc.exe",
+            "ToolPane_admin",
         )
 
     def test_excludes_diffable_fields(self, baseline_alert):
@@ -80,14 +83,28 @@ class TestBuildStructuralTemplate:
         in the template — it carries no diffing signal (see
         DIFFABLE_FIELDS handling in build_structural_template)."""
         instances = [
-            {"detection_rule_id": "r", "parent_image": "p", "child_image": "c",
-             "endpoint_family": "e", "auth_method_present": True,
-             "session_cookie_present": True, "integrity_level": "Medium",
-             "file_access_mode": "read", "egress_follows_access": False},
-            {"detection_rule_id": "r", "parent_image": "p", "child_image": "c",
-             "endpoint_family": "e", "auth_method_present": True,
-             "session_cookie_present": True, "integrity_level": "High",
-             "file_access_mode": "read", "egress_follows_access": False},
+            {
+                "detection_rule_id": "r",
+                "parent_image": "p",
+                "child_image": "c",
+                "endpoint_family": "e",
+                "auth_method_present": True,
+                "session_cookie_present": True,
+                "integrity_level": "Medium",
+                "file_access_mode": "read",
+                "egress_follows_access": False,
+            },
+            {
+                "detection_rule_id": "r",
+                "parent_image": "p",
+                "child_image": "c",
+                "endpoint_family": "e",
+                "auth_method_present": True,
+                "session_cookie_present": True,
+                "integrity_level": "High",
+                "file_access_mode": "read",
+                "egress_follows_access": False,
+            },
         ]
         result = build_structural_template(instances)
         assert "integrity_level" not in result["fields"]
@@ -117,7 +134,9 @@ class TestDiffAlertAgainstTemplate:
         deviations = diff_alert_against_template(baseline_alert, confirmed_template_fields)
         assert deviations == []
 
-    def test_exhaustive_not_first_match_only(self, field_level_drift_alert, confirmed_template_fields):
+    def test_exhaustive_not_first_match_only(
+        self, field_level_drift_alert, confirmed_template_fields
+    ):
         """Dataset case #6: ALL 5 fields deviate simultaneously. Must
         report every one, not short-circuit on the first mismatch — this
         was an explicit design decision (see agent_prompts.py / classifier
@@ -125,8 +144,11 @@ class TestDiffAlertAgainstTemplate:
         deviations = diff_alert_against_template(field_level_drift_alert, confirmed_template_fields)
         deviated_fields = {d.split(":", 1)[0] for d in deviations}
         assert deviated_fields == {
-            "auth_method_present", "session_cookie_present",
-            "integrity_level", "file_access_mode", "egress_follows_access",
+            "auth_method_present",
+            "session_cookie_present",
+            "integrity_level",
+            "file_access_mode",
+            "egress_follows_access",
         }
 
     def test_single_field_deviation_detected(self, baseline_alert, confirmed_template_fields):

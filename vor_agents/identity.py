@@ -13,7 +13,7 @@ DIFFABLE_FIELDS = [
     "auth_method_present",
     "session_cookie_present",
     "integrity_level",
-    "file_access_mode",       # read vs write
+    "file_access_mode",  # read vs write
     "egress_follows_access",  # bool
 ]
 
@@ -29,8 +29,8 @@ DIFFABLE_FIELDS = [
 # volume — no production Hayabusa/EVTX history exists yet to calibrate
 # against (same open gap noted throughout this design). Recalibrate once
 # real traffic is available; MIN_DIVERSITY in particular is a guess.
-GRADUATION_THRESHOLD = 3   # minimum confirmed instances
-MIN_DIVERSITY = 0.5        # minimum evidence_diversity_score, see evidence_diversity.py
+GRADUATION_THRESHOLD = 3  # minimum confirmed instances
+MIN_DIVERSITY = 0.5  # minimum evidence_diversity_score, see evidence_diversity.py
 
 
 class MalformedAlertError(ValueError):

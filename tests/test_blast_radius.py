@@ -83,6 +83,7 @@ class TestProposeBlastRadius:
         """A proposal must be inert — it returns a dict, it does not
         mutate BLAST_RADIUS_TABLE. Verify the table is unaffected."""
         from vor_agents.blast_radius import BLAST_RADIUS_TABLE
+
         before = dict(BLAST_RADIUS_TABLE)
         propose_blast_radius(
             identity_key=("rule", "brand_new_process.exe", "child.exe", "family"),

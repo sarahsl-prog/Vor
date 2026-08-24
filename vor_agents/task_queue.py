@@ -100,8 +100,6 @@ def enqueue_audit(
         logger.bind(identity_key=identity_key, task_name=task_name, error=str(exc)).error(
             "Failed to enqueue audit task"
         )
-        raise AuditEnqueueError(
-            f"Failed to enqueue audit for {identity_key}: {exc}"
-        ) from exc
+        raise AuditEnqueueError(f"Failed to enqueue audit for {identity_key}: {exc}") from exc
 
     return True

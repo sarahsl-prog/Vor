@@ -60,9 +60,13 @@ def test_classify_enqueues_audit_task_on_suppress(fake_firestore, fake_tasks_cli
         monkeypatch.setenv(key, value)
     identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
 
-    with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.get_tasks_client", return_value=fake_tasks_client), \
-         patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
+        patch(
+            "main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))
+        ),
+    ):
         client = TestClient(main.app)
         resp = client.post("/classify", json=_full_alert())
 
@@ -80,9 +84,13 @@ def test_classify_does_not_enqueue_second_task_for_same_pattern(
         monkeypatch.setenv(key, value)
     identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
 
-    with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.get_tasks_client", return_value=fake_tasks_client), \
-         patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
+        patch(
+            "main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))
+        ),
+    ):
         client = TestClient(main.app)
         client.post("/classify", json=_full_alert())
         client.post("/classify", json=_full_alert())
@@ -104,9 +112,13 @@ def test_classify_returns_result_even_if_enqueue_fails(fake_firestore, monkeypat
         def create_task(self, parent, task):
             raise RuntimeError("Cloud Tasks unavailable")
 
-    with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.get_tasks_client", return_value=_BoomTasksClient()), \
-         patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=_BoomTasksClient()),
+        patch(
+            "main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))
+        ),
+    ):
         client = TestClient(main.app)
         resp = client.post("/classify", json=_full_alert())
 
@@ -134,9 +146,13 @@ def test_classify_returns_result_even_if_task_env_var_missing(
     monkeypatch.delenv("TASKS_OIDC_SA_EMAIL", raising=False)
     identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
 
-    with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.get_tasks_client", return_value=fake_tasks_client), \
-         patch("main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
+        patch(
+            "main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))
+        ),
+    ):
         client = TestClient(main.app)
         resp = client.post("/classify", json=_full_alert())
 
@@ -145,8 +161,10 @@ def test_classify_returns_result_even_if_task_env_var_missing(
 
 
 def test_sweep_returns_enqueued_count(fake_firestore):
-    with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.run_scheduled_sweep", return_value=[("a",), ("b",), ("c",)]):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.run_scheduled_sweep", return_value=[("a",), ("b",), ("c",)]),
+    ):
         client = TestClient(main.app)
         resp = client.post("/sweep", json={})
 
@@ -191,8 +209,10 @@ def test_audit_endpoint_invokes_audit_pattern(fake_firestore):
         reasoning="clean",
     )
 
-    with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.audit_pattern", new=AsyncMock(return_value=fake_decision)) as mock_audit:
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.audit_pattern", new=AsyncMock(return_value=fake_decision)) as mock_audit,
+    ):
         client = TestClient(main.app)
         resp = client.post(
             "/audit", json={"identity_key": identity_key, "pattern_data": {"triggered_by": "test"}}
@@ -224,7 +244,9 @@ def test_audit_endpoint_rejects_missing_pattern_data(fake_firestore):
 def test_audit_endpoint_rejects_non_json_body(fake_firestore):
     with patch("main.get_firestore_client", return_value=fake_firestore):
         client = TestClient(main.app)
-        resp = client.post("/audit", content=b"not json", headers={"content-type": "application/json"})
+        resp = client.post(
+            "/audit", content=b"not json", headers={"content-type": "application/json"}
+        )
 
     assert resp.status_code == 422
 

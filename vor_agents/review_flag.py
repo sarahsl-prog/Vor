@@ -7,7 +7,7 @@ prompt: when in doubt, force a deterministic degrade rather than trusting
 a model to notice the ambiguity itself.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .enrichment import CONFIDENCE_COLLECTION, _doc_id, invalidate_instances
 
@@ -56,7 +56,7 @@ def clear_under_review(
 
     update = {
         "under_review": False,
-        "last_reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "last_reviewed_at": datetime.now(UTC).isoformat(),
     }
     if auditor_decision["action"] == "DOWNGRADE":
         rebuild = invalidate_instances(

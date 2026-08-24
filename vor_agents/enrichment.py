@@ -60,9 +60,7 @@ def enrich(alert: dict, firestore_client) -> dict:
     all); it is NOT used to re-decide tier at classification time.
     """
     identity_key = pattern_identity_key(alert)
-    doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(
-        _doc_id(identity_key)
-    )
+    doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
     doc = doc_ref.get()
 
     if not doc.exists:
@@ -81,9 +79,7 @@ def enrich(alert: dict, firestore_client) -> dict:
     }
 
 
-def record_confirmed_negative(
-    alert: dict, firestore_client, human_confirmed: bool = True
-) -> dict:
+def record_confirmed_negative(alert: dict, firestore_client, human_confirmed: bool = True) -> dict:
     """
     Called when a human (or a sufficiently-sized seed batch) confirms an
     alert as a true negative. Appends to the pattern's confirmed-instance
@@ -107,9 +103,7 @@ def record_confirmed_negative(
     most recent call and silently mislabel every earlier instance.
     """
     identity_key = pattern_identity_key(alert)
-    doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(
-        _doc_id(identity_key)
-    )
+    doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
     doc = doc_ref.get()
     instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
     # Every stored instance gets a stable ID so the auditor can later
@@ -172,9 +166,7 @@ def seed_template(
         for instance in confirmed_negative_instances
     ]
     template = build_structural_template(seeded_instances, provenance="seeded")
-    doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(
-        _doc_id(identity_key)
-    )
+    doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
     doc_ref.set(
         {
             "identity_key": list(identity_key),
@@ -209,13 +201,12 @@ def invalidate_instances(
     write, so there's no gap between confidence data landing and the flag
     clearing.
     """
-    doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(
-        _doc_id(identity_key)
-    )
+    doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
     doc = doc_ref.get()
     instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
     remaining = [
-        instance for instance in instances
+        instance
+        for instance in instances
         if instance.get("instance_id") not in instance_ids_to_remove
     ]
 
