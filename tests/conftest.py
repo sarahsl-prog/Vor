@@ -190,6 +190,12 @@ class _FakeCollection:
         matches = {doc_id: data for doc_id, data in self._store.items() if data.get(field) == value}
         return _FakeQuery(matches)
 
+    def stream(self):
+        for doc_id, data in self._store.items():
+            snap = _FakeDocSnapshot(data)
+            snap.id = doc_id
+            yield snap
+
 
 class _FakeQuery:
     def __init__(self, matches):
