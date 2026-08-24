@@ -2,6 +2,8 @@
 
 **Status:** All 20 findings in `Code-review-Aug15.md` validated against current source (2026-08-15). None stale. Order below = fix order (critical → low), per CLAUDE.md's one-task-at-a-time rule.
 
+**Update (2026-08-24):** All 20 tasks now ✅ DONE. Only Task 21 (self-surfaced during Task 13, not in the original report) and the "Outstanding decisions" items below remain open.
+
 ---
 
 ## 🔴 Critical — fix first
@@ -128,33 +130,37 @@
 
 ## 🟢 Low / Tooling & Docs
 
-### Task 16 — Align Python version (3.13 everywhere)
-- [ ] Confirmed: `CLAUDE.md` says 3.13, `Dockerfile:1` says `python:3.12-slim`, `.github/workflows/ci.yml` says `"3.12"`.
-- [ ] Decide: 3.13 (matches CLAUDE.md) or intentionally 3.12 — **ask user**, this is a real decision not implementation detail.
-- [ ] Update `Dockerfile`, `.github/workflows/ci.yml` to match.
-- [ ] Commit: `Align Python version to 3.13 across Dockerfile, CI, docs`
+### Task 16 — Align Python version (3.13 everywhere) ✅ DONE
+- [x] `.github/workflows/ci.yml` was already at 3.13 (landed earlier, in `3c38e6f`). Only `Dockerfile:1` still lagged at `python:3.12-slim`.
+- [x] Decision: 3.13, per CLAUDE.md and the already-aligned CI — not a live ambiguity by the time this ran, so proceeded rather than re-blocking on a question CI's prior fix had already answered.
+- [x] `Dockerfile` → `python:3.13-slim`.
+- [x] Commit: `c41de63` — `Align Dockerfile to Python 3.13, matching CLAUDE.md and CI`
 
-### Task 17 — Add `.pre-commit-config.yaml`
-- [ ] Confirmed missing at repo root.
-- [ ] Add config with `ruff`, `black`, `mypy --strict`, `bandit` hooks.
-- [ ] Update `.github/workflows/ci.yml` to run the same checks (currently only `ruff check .` + `pytest -v`).
-- [ ] Commit: `Add pre-commit config with ruff/black/mypy/bandit`
+### Task 17 — Add `.pre-commit-config.yaml` ✅ DONE
+- [x] Confirmed missing at repo root.
+- [x] Added config with `ruff`, `black`, `mypy`, `bandit` hooks — **`language: system`** (not the usual hosted mirrors) so hooks run the exact tool versions pinned in `requirements-dev.txt`, guaranteeing pre-commit and CI can't drift apart. `mypy --strict` deliberately **not** used: `mypy --strict vor_agents/ main.py` currently reports 53 errors (missing generic type args, untyped function signatures across `enrichment.py`, `orchestrator.py`, `main.py`, etc.) — enabling it would mean either a large unrelated signature-annotation pass or a red hook out of the gate. Flagging as its own decision, not bundled in here: **does the team want to invest in full strict-mode compliance?**
+- [x] `.github/workflows/ci.yml` already runs the same four checks (ruff/black/mypy/bandit/pytest, landed earlier in `3c38e6f`) — no CI change needed here.
+- [x] Added `pre-commit` itself to `requirements-dev.txt`.
+- [x] Verified: `pre-commit run --all-files` — all 4 hooks pass (black's first run reformatted 8 files, folded into Task 20 below as its own commit; second run clean).
+- [x] Commit: `62b7d51` — `Add pre-commit config with ruff/black/mypy/bandit`
 
-### Task 18 — Pin `requirements.txt`
-- [ ] Confirmed unpinned: `google-adk`, `google-cloud-firestore`, `google-cloud-tasks`, `loguru`, `pydantic`, `fastapi`, `uvicorn[standard]`.
-- [ ] Pin exact versions from current working `.venv` (or latest tested-good versions).
-- [ ] Add lock file (`uv pip compile` or `pip-compile`).
-- [ ] Commit: `Pin requirements.txt dependency versions`
+### Task 18 — Pin `requirements.txt` ✅ DONE
+- [x] Confirmed unpinned: `google-adk`, `google-cloud-firestore`, `google-cloud-tasks`, `loguru`, `pydantic`, `fastapi`, `uvicorn[standard]`. Also pinned `requirements-dev.txt` (same reproducibility risk, same fix shape).
+- [x] Pinned exact versions from the working `.venv` (read via `importlib.metadata`/`pip3 list` — note: this venv is `uv`-managed with no `pip` shim on PATH, only `pip3`/`pip3.13`; a bare `pip` in a shell here resolves to the *system* pip instead and silently reports a different/wrong package set — tripped over this mid-task, worth remembering next time in this repo).
+- [x] Verified by installing into a **fresh** venv from the pinned files alone (not the working `.venv`) and running the full suite: 99/99 pass.
+- [x] No lock file added (`uv.lock`/`pip-compile` output) — plain `==` pins judged sufficient for a dependency tree this size; revisit if it grows.
+- [x] Commit: `3277b79` — `Pin requirements.txt and requirements-dev.txt to exact versions`
 
 ### Task 19 — Fix `mypy` error in `_run_agent` ✅ DONE (folded into Task 2's commit `d9d70fb`)
 - [x] `vor_agents/orchestrator.py` — resolved as part of the Task 2 rewrite: `text = getattr(part, "text", None)` assigns to a local (mypy sees `Any`) instead of re-reading `part.text` directly after the guard.
 - [x] Verify: `mypy vor_agents/ main.py tests/` — **0 errors** (was 1). Note: repo has no `mypy.ini`/`pyproject.toml` `[tool.mypy]` section, so this ran under mypy defaults, not `--strict` — strict mode not yet configured (ties into Task 17's pre-commit config).
 
-### Task 20 — Run `black .`
-- [ ] Confirmed: `black --check .` reports 16 files would reformat.
-- [ ] Run `black .` once repo-wide.
-- [ ] Add to CI/pre-commit (Task 17) so it doesn't drift again.
-- [ ] Commit: `Reformat codebase with black` (standalone commit, no logic changes mixed in)
+### Task 20 — Run `black .` ✅ DONE
+- [x] Confirmed at time of running: `black --check .` reported 8 files would reformat (down from the report's original 16 — several had already been reformatted incidentally by earlier fix commits).
+- [x] Ran `black .` repo-wide (surfaced via `pre-commit run --all-files` while validating Task 17's new config — same action either way).
+- [x] Already in CI (`3c38e6f`) and now in pre-commit (Task 17) so it can't drift again.
+- [x] Suite: 99 passed, unchanged — formatting only. ruff/mypy/bandit clean.
+- [x] Commit: `e0e24b6` — `Reformat codebase with black` (standalone, no logic changes mixed in; committed *before* Task 17's config commit despite being discovered during it, to keep the two changes separable)
 
 ---
 
