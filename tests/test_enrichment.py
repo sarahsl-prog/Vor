@@ -69,6 +69,7 @@ class TestRecordConfirmedNegative:
 
         from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
         from vor_agents.identity import pattern_identity_key
+
         key = pattern_identity_key(baseline_alert)
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
         instances = doc.to_dict()["confirmed_instances"]
@@ -81,6 +82,7 @@ class TestRecordConfirmedNegative:
 
         from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
         from vor_agents.identity import pattern_identity_key
+
         key = pattern_identity_key(baseline_alert)
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
         instances = doc.to_dict()["confirmed_instances"]
@@ -100,6 +102,7 @@ class TestRecordConfirmedNegative:
 
         from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
         from vor_agents.identity import pattern_identity_key
+
         key = pattern_identity_key(first)
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
         instances = doc.to_dict()["confirmed_instances"]
@@ -155,6 +158,7 @@ class TestSeedTemplate:
         seed_template(key, diverse_confirmed_instances, fake_firestore)
 
         from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
         stored = doc.to_dict()["confirmed_instances"]
         assert all(inst["verified_by"] == "bulk" for inst in stored)

@@ -62,11 +62,13 @@ def test_malformed_timestamp_not_counted_as_a_distinct_hour():
 def test_valid_and_malformed_timestamps_mixed_only_valid_counted():
     instances = [
         {"host": f"h{i}", "user": f"u{i}", "timestamp": ts}
-        for i, ts in enumerate([
-            "2026-08-01T09:00:00Z",
-            "2026-08-01T14:00:00Z",
-            "not-a-timestamp-at-all",
-        ])
+        for i, ts in enumerate(
+            [
+                "2026-08-01T09:00:00Z",
+                "2026-08-01T14:00:00Z",
+                "not-a-timestamp-at-all",
+            ]
+        )
     ]
     score = evidence_diversity_score(instances)
     # host/user both fully diverse (3/3 = 1.0 each); hours dimension sees

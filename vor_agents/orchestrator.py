@@ -197,15 +197,17 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
         # trusting a fresh SUPPRESS for it is the dangerous direction.
         # Same "force the safe outcome in code, don't ask the model to
         # reconsider" principle as every other override in this function.
-        classifier_output = classifier_output.model_copy(update={
-            "decision": "UNCERTAIN",
-            "uncertain_reason": "under_review",
-            "reasoning": (
-                classifier_output.reasoning
-                + " [Vör correctness override: pattern is under active "
-                "audit; SUPPRESS not allowed until review completes.]"
-            ),
-        })
+        classifier_output = classifier_output.model_copy(
+            update={
+                "decision": "UNCERTAIN",
+                "uncertain_reason": "under_review",
+                "reasoning": (
+                    classifier_output.reasoning
+                    + " [Vör correctness override: pattern is under active "
+                    "audit; SUPPRESS not allowed until review completes.]"
+                ),
+            }
+        )
 
     if precomputed_deviations:
         precomputed_fields = _deviation_field_names(precomputed_deviations)
@@ -291,9 +293,9 @@ async def audit_pattern(identity_key: tuple, pattern_data: dict, firestore_clien
         # (days_since_last_review, blast_radius, etc.) from
         # select_audit_targets(), and the auditor prompt now depends on
         # seeing every instance_id to be able to cite one.
-        doc = firestore_client.collection(CONFIDENCE_COLLECTION).document(
-            _doc_id(identity_key)
-        ).get()
+        doc = (
+            firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
+        )
         confirmed_instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
 
         prompt = (
@@ -413,8 +415,7 @@ def _fetch_all_confirmed_patterns(firestore_client) -> list[dict]:
         identity_key_field = data.get("identity_key")
         if not identity_key_field:
             logger.bind(doc_id=doc.id).warning(
-                "Confirmed-tier doc missing identity_key field, skipping "
-                "(pre-migration doc?)"
+                "Confirmed-tier doc missing identity_key field, skipping " "(pre-migration doc?)"
             )
             continue
 
@@ -434,17 +435,19 @@ def _fetch_all_confirmed_patterns(firestore_client) -> list[dict]:
         else:
             days_since = 9999  # never audited — treat as maximally stale
 
-        patterns.append({
-            "identity_key": tuple(identity_key_field),
-            "days_since_last_review": days_since,
-            "evidence_diversity_score": evidence_diversity_score(instances),
-            # Worst case across ALL instances, not just the first —
-            # different confirmed instances of the same pattern can carry
-            # different indicator values (e.g. different hosts with
-            # different privilege contexts), and blast radius is
-            # deliberately a worst-case estimate throughout this design.
-            "blast_radius_estimate": max(
-                estimate_blast_radius(instance) for instance in instances
-            ),
-        })
+        patterns.append(
+            {
+                "identity_key": tuple(identity_key_field),
+                "days_since_last_review": days_since,
+                "evidence_diversity_score": evidence_diversity_score(instances),
+                # Worst case across ALL instances, not just the first —
+                # different confirmed instances of the same pattern can carry
+                # different indicator values (e.g. different hosts with
+                # different privilege contexts), and blast radius is
+                # deliberately a worst-case estimate throughout this design.
+                "blast_radius_estimate": max(
+                    estimate_blast_radius(instance) for instance in instances
+                ),
+            }
+        )
     return patterns

@@ -210,25 +210,31 @@ class TestDeviationFieldNames:
     """
 
     def test_well_formed_strings_extract_field_name(self):
-        result = _deviation_field_names([
-            "integrity_level: template=Medium, observed=High",
-            "file_access_mode: template=read, observed=write",
-        ])
+        result = _deviation_field_names(
+            [
+                "integrity_level: template=Medium, observed=High",
+                "file_access_mode: template=read, observed=write",
+            ]
+        )
         assert result == {"integrity_level", "file_access_mode"}
 
     def test_colon_less_string_is_skipped_not_treated_as_field_name(self):
-        result = _deviation_field_names([
-            "integrity_level observed High instead of Medium",
-        ])
+        result = _deviation_field_names(
+            [
+                "integrity_level observed High instead of Medium",
+            ]
+        )
         assert result == set()
 
     def test_mix_of_well_formed_and_malformed_keeps_only_well_formed(self):
-        result = _deviation_field_names([
-            "integrity_level: template=Medium, observed=High",
-            "malformed deviation with no colon at all",
-            "",
-            "  ",
-        ])
+        result = _deviation_field_names(
+            [
+                "integrity_level: template=Medium, observed=High",
+                "malformed deviation with no colon at all",
+                "",
+                "  ",
+            ]
+        )
         assert result == {"integrity_level"}
 
 
@@ -353,9 +359,7 @@ class TestAuditPatternFailureHandling:
         assert decision.action == "NO_ACTION"
         assert "model unavailable" in decision.reasoning
 
-        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(
-            _doc_id(identity_key)
-        ).get()
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
         data = doc.to_dict()
         assert data["under_review"] is False
         assert data["last_reviewed_at"] is not None
@@ -376,9 +380,7 @@ class TestAuditPatternFailureHandling:
         assert decision.action == "NO_ACTION"
         assert "NOT_A_REAL_ACTION" in decision.reasoning or "action" in decision.reasoning
 
-        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(
-            _doc_id(identity_key)
-        ).get()
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
         assert doc.to_dict()["under_review"] is False
 
 
@@ -454,9 +456,7 @@ class TestRunScheduledSweep:
     already used inside async FastAPI handlers elsewhere in this repo.
     """
 
-    def test_enqueues_each_selected_target_and_returns_their_identity_keys(
-        self, fake_firestore
-    ):
+    def test_enqueues_each_selected_target_and_returns_their_identity_keys(self, fake_firestore):
         # detection_rule_id deliberately contains underscores — this used
         # to break _fetch_all_confirmed_patterns()'s doc.id.split("_")
         # reconstruction (see test_known_gaps.py, now fixed by storing

@@ -190,8 +190,10 @@ def test_sweep_returns_result_if_enqueue_misconfigured(
     for instance in diverse_confirmed_instances:
         record_confirmed_negative(instance, fake_firestore)
 
-    with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.get_tasks_client", return_value=fake_tasks_client):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
+    ):
         client = TestClient(main.app)
         resp = client.post("/sweep", json={})
 
@@ -261,11 +263,13 @@ def test_audit_endpoint_returns_422_on_malformed_stored_data(fake_firestore):
     retrying), not a bare 500."""
     from vor_agents.identity import MalformedAlertError
 
-    with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch(
-             "main.audit_pattern",
-             new=AsyncMock(side_effect=MalformedAlertError("missing field: integrity_level")),
-         ):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "main.audit_pattern",
+            new=AsyncMock(side_effect=MalformedAlertError("missing field: integrity_level")),
+        ),
+    ):
         client = TestClient(main.app)
         resp = client.post(
             "/audit", json={"identity_key": ["a", "b", "c", "d"], "pattern_data": {}}
@@ -279,11 +283,13 @@ def test_audit_endpoint_returns_500_on_unexpected_failure(fake_firestore):
     """A truly unexpected failure (Firestore unavailable, network) is the
     retryable direction — must stay a 500 so Cloud Tasks retries it,
     unlike the malformed-data case above."""
-    with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch(
-             "main.audit_pattern",
-             new=AsyncMock(side_effect=RuntimeError("Firestore unavailable")),
-         ):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "main.audit_pattern",
+            new=AsyncMock(side_effect=RuntimeError("Firestore unavailable")),
+        ),
+    ):
         client = TestClient(main.app)
         resp = client.post(
             "/audit", json={"identity_key": ["a", "b", "c", "d"], "pattern_data": {}}
@@ -320,9 +326,7 @@ def test_classify_rejects_invalid_json_body(fake_firestore):
     assert resp.status_code == 422
 
 
-def test_classify_allows_extra_context_fields(
-    fake_firestore, fake_tasks_client, monkeypatch
-):
+def test_classify_allows_extra_context_fields(fake_firestore, fake_tasks_client, monkeypatch):
     """extra="allow" on ClassifierRequest: fields beyond the four required
     identity ones (DIFFABLE_FIELDS, host/user/timestamp, or anything an
     alert schema might add later) must pass through to classify_alert(),
@@ -342,9 +346,11 @@ def test_classify_allows_extra_context_fields(
         captured_alert.update(alert)
         return _suppress_result(), identity_key
 
-    with patch("main.get_firestore_client", return_value=fake_firestore), \
-         patch("main.get_tasks_client", return_value=fake_tasks_client), \
-         patch("main.classify_alert", new=_fake_classify_alert):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
+        patch("main.classify_alert", new=_fake_classify_alert),
+    ):
         client = TestClient(main.app)
         resp = client.post("/classify", json=alert_with_extras)
 

@@ -114,11 +114,13 @@ def record_confirmed_negative(alert: dict, firestore_client, human_confirmed: bo
     # new one — found via testing: this function previously always
     # overwrote instance_id, which silently discarded IDs a caller had
     # already assigned.
-    instances.append({
-        **alert,
-        "instance_id": alert.get("instance_id", str(uuid.uuid4())),
-        "verified_by": "human" if human_confirmed else "bulk",
-    })
+    instances.append(
+        {
+            **alert,
+            "instance_id": alert.get("instance_id", str(uuid.uuid4())),
+            "verified_by": "human" if human_confirmed else "bulk",
+        }
+    )
 
     template = build_structural_template(instances, provenance="live")
     doc_ref.set(

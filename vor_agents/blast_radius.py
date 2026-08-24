@@ -94,8 +94,7 @@ def propose_blast_radius(
     """
     if proposed_tier not in TIER_RANGES:
         raise ValueError(
-            f"Unknown blast-radius tier {proposed_tier!r}; must be one of "
-            f"{sorted(TIER_RANGES)}"
+            f"Unknown blast-radius tier {proposed_tier!r}; must be one of " f"{sorted(TIER_RANGES)}"
         )
     low, high = TIER_RANGES[proposed_tier]
     if not (low <= proposed_score <= high):
