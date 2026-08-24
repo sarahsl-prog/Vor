@@ -61,9 +61,11 @@ outstanding-decisions discussion.
   but must land before first real deploy against pre-existing data.
 
 ### Task 6 — Consecutive-audit-failure escalation
-- [ ] Outstanding decision #4 from Code-review-Aug15/TODO-Aug15, still open. A repeatedly-failing
-  audit clears `under_review` and logs `NO_ACTION` silently every time — no `failure_count` or
-  escalation-to-human path anywhere in `vor_agents/`.
+- [x] Outstanding decision #4 from Code-review-Aug15/TODO-Aug15. **Resolved** — see
+  `docs/superpowers/plans/2026-08-24-audit-failure-escalation.md`. `failure_count` now tracked
+  on the confidence doc (`vor_agents/review_flag.py`'s `clear_under_review()`), surfaced through
+  `enrich()`, and enforced in `classify_alert()` (`vor_agents/orchestrator.py`) — a repeatedly-
+  failing audit no longer silently keeps a pattern autonomously suppressing.
 - [x] **Decision (2026-08-24): N consecutive failures escalates to a human.** `failure_count`
   field on the confidence doc, stamped in `audit_pattern()`'s except branch, reset on a
   genuinely successful audit.

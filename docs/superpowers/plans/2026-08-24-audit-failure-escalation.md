@@ -28,7 +28,7 @@
 **Interfaces:**
 - Produces: `UncertainReason.AUDIT_FAILING` (value `"audit_failing"`). Consumed by Task 4's `classify_alert()` override.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/test_schemas.py` (create the file with just this class if it doesn't exist yet):
 
@@ -41,12 +41,12 @@ class TestUncertainReason:
         assert UncertainReason.AUDIT_FAILING == "audit_failing"
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_schemas.py -k audit_failing -v`
 Expected: `AttributeError: AUDIT_FAILING`
 
-- [ ] **Step 3: Add the enum value**
+- [x] **Step 3: Add the enum value**
 
 In `vor_agents/schemas.py`, add to the `UncertainReason` enum:
 
@@ -60,12 +60,12 @@ class UncertainReason(str, Enum):
     NOT_APPLICABLE = "not_applicable"
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_schemas.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vor_agents/schemas.py tests/test_schemas.py
@@ -83,7 +83,7 @@ git commit -m "Add UncertainReason.AUDIT_FAILING"
 **Interfaces:**
 - Produces: `clear_under_review(pattern_identity_key, firestore_client, auditor_decision, audit_failed: bool = False) -> int` (return type changes from `None` to `int` -- the resulting `failure_count`). `NEEDS_ATTENTION_COLLECTION = "needs_attention"`. `record_needs_attention(pattern_identity_key: tuple[str, ...], failure_count: int, last_error: str, firestore_client: Client) -> None`. Both consumed by Task 4 (`orchestrator.py`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_review_flag.py`:
 
@@ -164,12 +164,12 @@ from vor_agents.review_flag import (
 )
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_review_flag.py -k "FailureCount or NeedsAttention" -v`
 Expected: `TypeError: clear_under_review() got an unexpected keyword argument 'audit_failed'` and `ImportError: cannot import name 'record_needs_attention'`.
 
-- [ ] **Step 3: Update `vor_agents/review_flag.py`**
+- [x] **Step 3: Update `vor_agents/review_flag.py`**
 
 Replace `clear_under_review()`'s body and add the new function:
 
@@ -265,17 +265,17 @@ def record_needs_attention(
     )
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_review_flag.py -v`
 Expected: all tests in the file PASS, including the 5 new ones.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy vor_agents/ main.py`
 Expected: all pass except `tests/test_orchestrator.py`'s existing `clear_under_review`-adjacent calls if any assert on its return value being `None` -- there shouldn't be any (the function was previously called for its side effect only), but confirm the only failures (if any) are `audit_pattern()` callers not yet passing `audit_failed` -- there are none, since it defaults to `False` and every other call site's behavior is unchanged. Expect **zero regressions**.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/review_flag.py tests/test_review_flag.py
@@ -293,7 +293,7 @@ git commit -m "Track failure_count in clear_under_review, add record_needs_atten
 **Interfaces:**
 - Produces: `enrich()`'s returned dict gains a `"failure_count": int` key (present whenever `status == "TEMPLATE"`, defaulting to `0`). Consumed by Task 4's `classify_alert()` override.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/test_enrichment.py`:
 
@@ -319,12 +319,12 @@ class TestEnrichFailureCount:
 
 Add `pattern_identity_key` to whichever import line in `tests/test_enrichment.py` already imports from `vor_agents.identity`, if it isn't imported yet.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_enrichment.py -k failure_count -v`
 Expected: `KeyError: 'failure_count'`
 
-- [ ] **Step 3: Update `enrich()` in `vor_agents/enrichment.py`**
+- [x] **Step 3: Update `enrich()` in `vor_agents/enrichment.py`**
 
 In the `TEMPLATE` branch's returned dict, add one line:
 
@@ -344,17 +344,17 @@ In the `TEMPLATE` branch's returned dict, add one line:
 
 Also update the module docstring's return-shape comment for `enrich()` to list `"failure_count": int` alongside the existing keys.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_enrichment.py -v`
 Expected: all tests PASS, including the 2 new ones.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy vor_agents/ main.py`
 Expected: all pass, no regressions.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/enrichment.py tests/test_enrichment.py
@@ -373,7 +373,7 @@ git commit -m "enrich() surfaces failure_count from the confidence doc"
 - Consumes: `clear_under_review(..., audit_failed) -> int`, `record_needs_attention()`, `NEEDS_ATTENTION_COLLECTION` (Task 2); `enrich()`'s `failure_count` key (Task 3); `UncertainReason.AUDIT_FAILING` (Task 1).
 - Produces: `AUDIT_FAILURE_ESCALATION_THRESHOLD = 3` (module-level constant in `orchestrator.py`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_orchestrator.py`:
 
@@ -505,12 +505,12 @@ from vor_agents.review_flag import NEEDS_ATTENTION_COLLECTION
 
 (Keep whatever's already imported from these modules -- add only what's missing.)
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_orchestrator.py -k "FailureEscalation or FailureCountBlocksSuppress" -v`
 Expected: `needs_attention` docs never written (feature doesn't exist yet); SUPPRESS not overridden (no `failure_count` check in `classify_alert()` yet).
 
-- [ ] **Step 3: Update `vor_agents/orchestrator.py`**
+- [x] **Step 3: Update `vor_agents/orchestrator.py`**
 
 Add the import and constant near the top of the file (with the other imports from `.review_flag`):
 
@@ -624,17 +624,17 @@ async def audit_pattern(
     return decision
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_orchestrator.py -v`
 Expected: all tests in the file PASS, including the 5 new ones.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py`
 Expected: all pass, no regressions.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/orchestrator.py tests/test_orchestrator.py
@@ -651,7 +651,7 @@ git commit -m "Escalate to needs_attention and block SUPPRESS after 3 consecutiv
 **Interfaces:**
 - None (documentation only).
 
-- [ ] **Step 1: Add a short section after step 3a (Cloud Tasks queue)**
+- [x] **Step 1: Add a short section after step 3a (Cloud Tasks queue)**
 
 ```markdown
 ## 3b. needs_attention collection (no setup required)
@@ -669,7 +669,7 @@ gcloud firestore documents list --collection-ids=needs_attention
 Revisit once there's an actual notification channel to wire this into.
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add docs/DEPLOY.md
@@ -680,7 +680,7 @@ git commit -m "Document the needs_attention collection has no alerting wired up 
 
 ## Final verification
 
-- [ ] Run `.venv/bin/python -m pytest -v` -- full suite passes.
-- [ ] Run `.venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py` -- all clean.
-- [ ] Confirm `git log --oneline -5` shows one commit per task.
-- [ ] Update `docs/TODO-Aug24.md` Task 6 checkbox to done, referencing the commits.
+- [x] Run `.venv/bin/python -m pytest -v` -- full suite passes.
+- [x] Run `.venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py` -- all clean.
+- [x] Confirm `git log --oneline -5` shows one commit per task.
+- [x] Update `docs/TODO-Aug24.md` Task 6 checkbox to done, referencing the commits.
