@@ -114,12 +114,36 @@ account` was passed in step 1), not `vor-scheduler` — that one is only
 for invoking this service and enqueueing Cloud Tasks, unrelated to what
 this service calls outward to Vertex AI.
 
-## 4. The `/classify` endpoint itself
+## 4. Wire /classify to a Pub/Sub push subscription
 
-`/classify` isn't wired to a trigger source yet — that's genuinely still
-open. Whatever ingests alerts (Hayabusa output, a Sigma rule webhook, a
-Pub/Sub topic something else publishes to) needs to call `POST /classify`
-with the alert JSON. If that source is another GCP service, grant it
-`roles/run.invoker` the same way as step 2; if it's an external webhook,
-front it with a Pub/Sub push subscription authenticated the same way
-rather than exposing `/classify` directly.
+```bash
+gcloud pubsub topics create vor-alerts
+
+gcloud pubsub subscriptions create vor-alerts-sub \
+  --topic vor-alerts \
+  --push-endpoint "https://YOUR_CLOUD_RUN_URL/classify" \
+  --push-auth-service-account "vor-scheduler@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+```
+
+Reuses the `vor-scheduler` service account created in step 2 -- it already
+has `roles/run.invoker` on this service, same reuse pattern as the Cloud
+Tasks `/audit` callback (step 3a).
+
+Whatever the ingest source is (Hayabusa output, a Sigma rule webhook,
+etc. -- not built as part of this repo) needs `roles/pubsub.publisher` on
+the `vor-alerts` topic:
+
+```bash
+gcloud pubsub topics add-iam-policy-binding vor-alerts \
+  --member "serviceAccount:YOUR_INGEST_SOURCE_SERVICE_ACCOUNT" \
+  --role "roles/pubsub.publisher"
+```
+
+`/classify` accepts both a Pub/Sub push envelope and a raw alert JSON
+body -- see `main.py`'s `_decode_classify_body()`. No separate endpoint
+for direct/manual calls.
+
+**Still open:** no dead-letter topic or `--max-delivery-attempts`
+configured on `vor-alerts-sub` yet -- a permanently-malformed message
+will retry and 422 until it ages out of the subscription's retention
+window. Revisit once real traffic volume exists to calibrate against.
