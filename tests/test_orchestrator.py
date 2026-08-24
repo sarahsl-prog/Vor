@@ -21,6 +21,7 @@ from vor_agents.enrichment import (
     _doc_id,
     record_confirmed_negative,
 )
+from vor_agents.identity import pattern_identity_key
 from vor_agents.orchestrator import (
     AgentOutputError,
     _deviation_field_names,
@@ -29,7 +30,7 @@ from vor_agents.orchestrator import (
     classify_alert,
     run_scheduled_sweep,
 )
-from vor_agents.review_flag import mark_under_review
+from vor_agents.review_flag import NEEDS_ATTENTION_COLLECTION, mark_under_review
 
 
 async def _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances):
@@ -477,6 +478,136 @@ class TestAuditPatternFailureHandling:
 
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
         assert doc.to_dict()["under_review"] is False
+
+
+@pytest.mark.asyncio
+class TestFailureEscalation:
+    """
+    audit_pattern() failing repeatedly for the same pattern must, at the
+    threshold, write a needs_attention doc -- not just clear the flag and
+    log silently forever. Mirrors TestProvisionalTierBlocksSuppress's
+    structure (Task 21 in docs/TODO-Aug15.md).
+    """
+
+    async def _fail_audit_once(self, identity_key, fake_firestore, monkeypatch):
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("model call failed")
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _boom)
+        return await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+    async def test_third_consecutive_failure_writes_needs_attention(
+        self, fake_firestore, monkeypatch
+    ):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        for _ in range(3):
+            await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+
+        doc = (
+            fake_firestore.collection(NEEDS_ATTENTION_COLLECTION)
+            .document(_doc_id(identity_key))
+            .get()
+        )
+        assert doc.exists
+        assert doc.to_dict()["failure_count"] == 3
+
+    async def test_two_consecutive_failures_do_not_escalate(self, fake_firestore, monkeypatch):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        for _ in range(2):
+            await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+
+        doc = (
+            fake_firestore.collection(NEEDS_ATTENTION_COLLECTION)
+            .document(_doc_id(identity_key))
+            .get()
+        )
+        assert not doc.exists
+
+    async def test_success_after_failures_resets_and_prevents_escalation(
+        self, fake_firestore, monkeypatch
+    ):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        for _ in range(2):
+            await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+
+        async def _ok(*args, **kwargs):
+            return {
+                "action": "NO_ACTION",
+                "invalidated_instance_ids": [],
+                "concerns_found": [],
+                "reasoning": "clean",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _ok)
+        await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+        # One more failure after the reset -- count should be 1, not 3.
+        await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+
+        doc = (
+            fake_firestore.collection(NEEDS_ATTENTION_COLLECTION)
+            .document(_doc_id(identity_key))
+            .get()
+        )
+        assert not doc.exists
+
+
+@pytest.mark.asyncio
+class TestFailureCountBlocksSuppress:
+    """Same shape as TestProvisionalTierBlocksSuppress -- SUPPRESS is
+    deterministically overridden once failure_count crosses the
+    escalation threshold, mirroring the under_review/provisional
+    overrides already in classify_alert()."""
+
+    async def test_suppress_overridden_when_failure_count_at_threshold(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances, monkeypatch
+    ):
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        identity_key = pattern_identity_key(baseline_alert)
+        doc_ref = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
+        doc_ref.set({"failure_count": 3}, merge=True)
+
+        async def _fake_run_agent(*args, **kwargs):
+            return {
+                "decision": "SUPPRESS",
+                "matched_pattern_id": "test",
+                "uncertain_reason": "not_applicable",
+                "structural_deviations_found": [],
+                "reasoning": "matches template",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _fake_run_agent)
+        result, _ = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "UNCERTAIN"
+        assert result.uncertain_reason == "audit_failing"
+
+    async def test_failure_count_below_threshold_does_not_override(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances, monkeypatch
+    ):
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        identity_key = pattern_identity_key(baseline_alert)
+        doc_ref = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
+        doc_ref.set({"failure_count": 2}, merge=True)
+
+        async def _fake_run_agent(*args, **kwargs):
+            return {
+                "decision": "SUPPRESS",
+                "matched_pattern_id": "test",
+                "uncertain_reason": "not_applicable",
+                "structural_deviations_found": [],
+                "reasoning": "matches template",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _fake_run_agent)
+        result, _ = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "SUPPRESS"
 
 
 class _FakePart:

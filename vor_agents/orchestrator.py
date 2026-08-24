@@ -25,7 +25,7 @@ from .classifier_agent import build_classifier_agent
 from .enrichment import CONFIDENCE_COLLECTION, _doc_id, enrich
 from .evidence_diversity import evidence_diversity_score
 from .identity import diff_alert_against_template
-from .review_flag import clear_under_review, mark_under_review
+from .review_flag import clear_under_review, mark_under_review, record_needs_attention
 from .schemas import (
     AuditorAction,
     AuditorOutput,
@@ -37,6 +37,11 @@ from .schemas import (
 session_service = InMemorySessionService()  # swap for a persistent
 # SessionService in production;
 # fine for a hackathon demo
+
+AUDIT_FAILURE_ESCALATION_THRESHOLD = 3
+# Unvalidated starting point, same posture as GRADUATION_THRESHOLD /
+# MIN_DIVERSITY elsewhere in this design -- no real audit-failure-rate
+# data exists yet to calibrate against.
 
 
 class AgentOutputError(Exception):
@@ -241,6 +246,30 @@ async def classify_alert(
             }
         )
 
+    if (
+        enrichment.get("failure_count", 0) >= AUDIT_FAILURE_ESCALATION_THRESHOLD
+        and classifier_output.decision == "SUPPRESS"
+    ):
+        # Same shape as the under_review/provisional-tier overrides above:
+        # a pattern whose audits keep failing has never actually been
+        # re-verified, no matter how many times the flag got cleared by
+        # audit_pattern()'s try/finally. Force UNCERTAIN rather than let
+        # a stale, never-successfully-audited pattern keep autonomously
+        # suppressing. See docs/superpowers/specs/
+        # 2026-08-24-audit-failure-escalation-design.md.
+        classifier_output = classifier_output.model_copy(
+            update={
+                "decision": "UNCERTAIN",
+                "uncertain_reason": "audit_failing",
+                "reasoning": (
+                    classifier_output.reasoning + " [Vör correctness override: this "
+                    "pattern's audits have failed repeatedly and it has not been "
+                    "successfully re-verified; SUPPRESS not allowed until a human "
+                    "resolves it.]"
+                ),
+            }
+        )
+
     if precomputed_deviations:
         precomputed_fields = _deviation_field_names(precomputed_deviations)
         reported_fields = _deviation_field_names(classifier_output.structural_deviations_found)
@@ -305,20 +334,18 @@ async def audit_pattern(
     identity_key: tuple[str, ...], pattern_data: dict[str, Any], firestore_client: Client
 ) -> AuditorOutput:
     """
-    Full audit path for one flagged pattern:
-      1. mark_under_review() — synchronous, BEFORE any LLM call, closes
-         the burst-replay race window immediately
-      2. Auditor agent call, separate context from the classifier
-      3. clear_under_review() atomically with the recorded decision,
-         ALWAYS — even if the auditor call itself failed (see except
-         below). Leaving under_review=True on failure would permanently
-         block autonomous suppression for this pattern until someone
-         manually clears the flag in Firestore; a failed audit degrading
-         to "reviewed, no action, try again next sweep" is the same
-         "force a safe outcome in code" principle used everywhere else in
-         this design, not a special case.
+    Full audit path for one flagged pattern -- see the existing docstring
+    for the mark/try/except/finally shape (unchanged). New in this
+    revision: tracks consecutive failures via clear_under_review()'s
+    audit_failed param, and once AUDIT_FAILURE_ESCALATION_THRESHOLD is
+    crossed, writes a needs_attention doc AND classify_alert() forces
+    UNCERTAIN for this pattern going forward (see that function's
+    failure_count override) -- both the in-band and out-of-band halves
+    of the escalation design.
     """
     mark_under_review(identity_key, firestore_client)
+    audit_failed = False
+    last_error_repr = ""
 
     try:
         # Fetch the full confirmed_instances list directly rather than
@@ -357,13 +384,34 @@ async def audit_pattern(
         # the pattern is still reachable by the next sweep/classify-
         # triggered audit, and the failure is visible in the decision's
         # own reasoning text rather than silently swallowed.
+        audit_failed = True
+        last_error_repr = repr(exc)
         logger.bind(identity_key=identity_key).exception("Audit failed")
         decision = AuditorOutput(
             action=AuditorAction.NO_ACTION,
             reasoning=f"Audit failed with error: {exc!r}",
         )
     finally:
-        clear_under_review(identity_key, firestore_client, decision.model_dump())
+        new_failure_count = clear_under_review(
+            identity_key, firestore_client, decision.model_dump(), audit_failed=audit_failed
+        )
+
+    if audit_failed and new_failure_count >= AUDIT_FAILURE_ESCALATION_THRESHOLD:
+        logger.bind(identity_key=identity_key, failure_count=new_failure_count).critical(
+            "Audit failed {} consecutive times; pattern needs human attention",
+            new_failure_count,
+        )
+        try:
+            record_needs_attention(
+                identity_key, new_failure_count, last_error_repr, firestore_client
+            )
+        except Exception as record_exc:  # noqa: BLE001 — deliberate: a
+            # failure to record the escalation must never propagate out
+            # of audit_pattern() and must never prevent the
+            # clear_under_review() write above, which already happened.
+            logger.bind(identity_key=identity_key).error(
+                "Failed to record needs_attention doc: {}", record_exc
+            )
 
     return decision
 
