@@ -172,6 +172,9 @@ class _FakeDocRef:
             raise KeyError(f"No document to update: {self._doc_id}")
         self._store[self._doc_id].update(data)
 
+    def delete(self) -> None:
+        self._store.pop(self._doc_id, None)
+
 
 class _FakeCollection:
     def __init__(self, store):
