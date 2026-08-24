@@ -7,6 +7,8 @@ as "the same pattern" or "an invariant field" — that judgment call belongs
 in code that's testable and auditable on its own, not embedded in a prompt.
 """
 
+from typing import Any
+
 from .evidence_diversity import evidence_diversity_score
 
 DIFFABLE_FIELDS = [
@@ -46,7 +48,7 @@ class MalformedAlertError(ValueError):
     """
 
 
-def _validate_diffable_fields(instance: dict) -> None:
+def _validate_diffable_fields(instance: dict[str, Any]) -> None:
     missing = [field for field in DIFFABLE_FIELDS if field not in instance]
     if missing:
         raise MalformedAlertError(
@@ -54,7 +56,7 @@ def _validate_diffable_fields(instance: dict) -> None:
         )
 
 
-def pattern_identity_key(alert: dict) -> tuple:
+def pattern_identity_key(alert: dict[str, Any]) -> tuple[str, ...]:
     """
     (detection_rule_id, parent_image, child_image, endpoint_family)
 
@@ -72,8 +74,8 @@ def pattern_identity_key(alert: dict) -> tuple:
 
 
 def build_structural_template(
-    confirmed_negative_instances: list[dict], provenance: str = "live"
-) -> dict:
+    confirmed_negative_instances: list[dict[str, Any]], provenance: str = "live"
+) -> dict[str, Any]:
     """
     Returns:
         {
@@ -123,7 +125,9 @@ def build_structural_template(
     }
 
 
-def diff_alert_against_template(alert: dict, template_fields: dict) -> list[str]:
+def diff_alert_against_template(
+    alert: dict[str, Any], template_fields: dict[str, Any]
+) -> list[str]:
     """
     Exhaustive diff — every field checked, never short-circuits on first
     mismatch. Returns human-readable deviation strings, empty list if none.

@@ -13,6 +13,8 @@ something HIGH/CRITICAL is the conservative move and can happen freely;
 scoring it MEDIUM/LOW requires a human to actually commit it.
 """
 
+from typing import Any
+
 CRITICAL = 0.95
 HIGH = 0.75
 MEDIUM = 0.45
@@ -48,7 +50,7 @@ BLAST_RADIUS_TABLE: dict[tuple[str, str], float] = {
 }
 
 
-def estimate_blast_radius(alert: dict) -> float:
+def estimate_blast_radius(alert: dict[str, Any]) -> float:
     """
     Checks every indicator present on the alert against
     BLAST_RADIUS_TABLE, returns the MAX matching score — blast radius is
@@ -68,12 +70,12 @@ def estimate_blast_radius(alert: dict) -> float:
 
 
 def propose_blast_radius(
-    identity_key: tuple,
+    identity_key: tuple[str, ...],
     proposed_tier: str,
     proposed_score: float,
     cited_indicators: list[str],
     rationale: str,
-) -> dict:
+) -> dict[str, Any]:
     """
     NOT auto-applied to BLAST_RADIUS_TABLE under any circumstances. Callable
     by a human directly, or by an LLM step (e.g. an extended auditor pass)

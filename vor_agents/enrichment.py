@@ -9,13 +9,16 @@ fetches this itself.
 import hashlib
 import json
 import uuid
+from typing import Any
+
+from google.cloud.firestore import Client
 
 from .identity import build_structural_template, pattern_identity_key
 
 CONFIDENCE_COLLECTION = "confidence_docs"
 
 
-def _doc_id(identity_key: tuple) -> str:
+def _doc_id(identity_key: tuple[str, ...]) -> str:
     """
     Doc ID is a content hash of the identity_key tuple, not a "_"-joined
     string. The join-based scheme was ambiguous and lossy: identity_key
@@ -36,7 +39,7 @@ def _doc_id(identity_key: tuple) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
-def enrich(alert: dict, firestore_client) -> dict:
+def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
     """
     Returns either:
         {"status": "NO_HISTORY"}
@@ -66,7 +69,11 @@ def enrich(alert: dict, firestore_client) -> dict:
     if not doc.exists:
         return {"status": "NO_HISTORY", "pattern_identity_key": identity_key}
 
-    data = doc.to_dict()
+    # doc.to_dict() is None exactly when the doc doesn't exist — already
+    # ruled out above — but mypy can't correlate that with doc.exists
+    # (a separate attribute), so `or {}` makes the non-None guarantee
+    # explicit for the type checker too, not just at runtime.
+    data = doc.to_dict() or {}
     return {
         "status": "TEMPLATE",
         "pattern_identity_key": identity_key,
@@ -79,7 +86,9 @@ def enrich(alert: dict, firestore_client) -> dict:
     }
 
 
-def record_confirmed_negative(alert: dict, firestore_client, human_confirmed: bool = True) -> dict:
+def record_confirmed_negative(
+    alert: dict[str, Any], firestore_client: Client, human_confirmed: bool = True
+) -> dict[str, Any]:
     """
     Called when a human (or a sufficiently-sized seed batch) confirms an
     alert as a true negative. Appends to the pattern's confirmed-instance
@@ -105,7 +114,10 @@ def record_confirmed_negative(alert: dict, firestore_client, human_confirmed: bo
     identity_key = pattern_identity_key(alert)
     doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
     doc = doc_ref.get()
-    instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
+    # doc.to_dict() is None exactly when the doc doesn't exist, so `or {}`
+    # collapses what used to be an explicit `if doc.exists else []` —
+    # same result, and makes the non-None case explicit for mypy too.
+    instances = (doc.to_dict() or {}).get("confirmed_instances", [])
     # Every stored instance gets a stable ID so the auditor can later
     # point at specific instances to invalidate rather than only being
     # able to distrust the pattern as a whole (see invalidate_instances()).
@@ -146,8 +158,10 @@ def record_confirmed_negative(alert: dict, firestore_client, human_confirmed: bo
 
 
 def seed_template(
-    identity_key: tuple, confirmed_negative_instances: list[dict], firestore_client
-) -> dict:
+    identity_key: tuple[str, ...],
+    confirmed_negative_instances: list[dict[str, Any]],
+    firestore_client: Client,
+) -> dict[str, Any]:
     """
     Bulk-import path for synthetic/historical data (dataset case #1).
     Can enter directly at "confirmed" tier if the seed batch already meets
@@ -186,8 +200,8 @@ def seed_template(
 
 
 def invalidate_instances(
-    identity_key: tuple, instance_ids_to_remove: list[str], firestore_client
-) -> dict:
+    identity_key: tuple[str, ...], instance_ids_to_remove: list[str], firestore_client: Client
+) -> dict[str, Any]:
     """
     Targeted evidence invalidation — the auditor's DOWNGRADE mechanism.
     Removes only the cited instance_ids from the pool and rebuilds the
@@ -205,14 +219,18 @@ def invalidate_instances(
     """
     doc_ref = firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
     doc = doc_ref.get()
-    instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
+    # See record_confirmed_negative() above for why `or {}` (not the
+    # `if doc.exists else` ternary this replaced) is both simpler and
+    # what makes the non-None case explicit for mypy.
+    data = doc.to_dict() or {}
+    instances = data.get("confirmed_instances", [])
     remaining = [
         instance
         for instance in instances
         if instance.get("instance_id") not in instance_ids_to_remove
     ]
 
-    provenance = doc.to_dict().get("provenance", "live") if doc.exists else "live"
+    provenance = data.get("provenance", "live")
     template = build_structural_template(remaining, provenance=provenance)
     return {
         "confirmed_instances": remaining,

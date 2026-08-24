@@ -7,10 +7,14 @@ auditor_agent.py) with no orchestration logic of its own.
 
 import json
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
+from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+from google.cloud.firestore import Client
 from google.genai.types import Content, Part
 from loguru import logger
 
@@ -46,7 +50,7 @@ class AgentOutputError(Exception):
     """
 
 
-async def _run_agent(agent, prompt_text: str, session_id: str) -> dict:
+async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[str, Any]:
     """Shared runner plumbing — both agents call through this."""
     runner = Runner(
         agent=agent,
@@ -70,7 +74,7 @@ async def _run_agent(agent, prompt_text: str, session_id: str) -> dict:
                 if text:
                     result_text += text
     try:
-        parsed: dict = json.loads(result_text)
+        parsed: dict[str, Any] = json.loads(result_text)
         return parsed
     except json.JSONDecodeError as exc:
         raise AgentOutputError(
@@ -110,7 +114,9 @@ def _deviation_field_names(deviation_strings: list[str]) -> set[str]:
     return parsed
 
 
-async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutput, tuple]:
+async def classify_alert(
+    alert: dict[str, Any], firestore_client: Client
+) -> tuple[ClassifierOutput, tuple[str, ...]]:
     """
     Full classification path for one incoming alert:
       1. Deterministic enrichment (Firestore read + aggregation, no LLM)
@@ -295,7 +301,9 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
     return classifier_output, identity_key
 
 
-async def audit_pattern(identity_key: tuple, pattern_data: dict, firestore_client) -> AuditorOutput:
+async def audit_pattern(
+    identity_key: tuple[str, ...], pattern_data: dict[str, Any], firestore_client: Client
+) -> AuditorOutput:
     """
     Full audit path for one flagged pattern:
       1. mark_under_review() — synchronous, BEFORE any LLM call, closes
@@ -322,7 +330,11 @@ async def audit_pattern(identity_key: tuple, pattern_data: dict, firestore_clien
         doc = (
             firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
         )
-        confirmed_instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
+        # doc.to_dict() is None exactly when the doc doesn't exist, so
+        # `or {}` collapses what used to be an explicit `if doc.exists
+        # else []` — same result, and explicit for mypy too (it can't
+        # correlate doc.exists with a separate to_dict() call).
+        confirmed_instances = (doc.to_dict() or {}).get("confirmed_instances", [])
 
         prompt = (
             f"Pattern under review:\n{json.dumps(pattern_data, indent=2)}\n\n"
@@ -356,7 +368,11 @@ async def audit_pattern(identity_key: tuple, pattern_data: dict, firestore_clien
     return decision
 
 
-def run_scheduled_sweep(firestore_client, enqueue_audit_fn, max_targets: int = 10) -> list[tuple]:
+def run_scheduled_sweep(
+    firestore_client: Client,
+    enqueue_audit_fn: Callable[[tuple[str, ...], dict[str, Any]], bool],
+    max_targets: int = 10,
+) -> list[tuple[str, ...]]:
     """
     Safety-net path — invoked on a timer (e.g. weekly Cloud Scheduler job
     hitting a Cloud Run endpoint that calls this function). Reuses the
@@ -389,7 +405,7 @@ def run_scheduled_sweep(firestore_client, enqueue_audit_fn, max_targets: int = 1
     return enqueued
 
 
-def _fetch_all_confirmed_patterns(firestore_client) -> list[dict]:
+def _fetch_all_confirmed_patterns(firestore_client: Client) -> list[dict[str, Any]]:
     """
     Queries CONFIDENCE_COLLECTION for tier == "confirmed" docs and shapes
     them into what select_audit_targets() expects: days_since_last_review,
@@ -425,7 +441,12 @@ def _fetch_all_confirmed_patterns(firestore_client) -> list[dict]:
 
     patterns = []
     for doc in docs:
-        data = doc.to_dict()
+        # A doc yielded by .stream() always exists at query time, so
+        # to_dict() is never actually None here — but the stub type is
+        # Optional regardless of that runtime guarantee (it doesn't
+        # special-case query results), so `or {}` makes it explicit for
+        # mypy too, same as every other doc.to_dict() call in this file.
+        data = doc.to_dict() or {}
         instances = data.get("confirmed_instances", [])
         if not instances:
             continue  # confirmed tier with no instances shouldn't occur, but skip defensively

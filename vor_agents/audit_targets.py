@@ -6,8 +6,12 @@ makes it safe for the same kind of reasoning being audited to not also be
 the thing deciding what gets audited.
 """
 
+from typing import Any
 
-def select_audit_targets(all_suppressed_patterns: list[dict], max_targets: int = 10) -> list[dict]:
+
+def select_audit_targets(
+    all_suppressed_patterns: list[dict[str, Any]], max_targets: int = 10
+) -> list[dict[str, Any]]:
     """
     Priority score = weighted sum of:
       - days_since_last_review (older = higher priority)
@@ -27,7 +31,7 @@ def select_audit_targets(all_suppressed_patterns: list[dict], max_targets: int =
     genuinely never-audited, the opposite of "needs attention."
     """
 
-    def priority(pattern: dict) -> tuple[float, str]:
+    def priority(pattern: dict[str, Any]) -> tuple[float, str]:
         days_since = max(pattern["days_since_last_review"], 0)
         score = (
             days_since * 1.0

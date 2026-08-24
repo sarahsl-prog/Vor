@@ -11,9 +11,10 @@ judgment alone.
 """
 
 from datetime import datetime
+from typing import Any
 
 
-def evidence_diversity_score(confirmed_instances: list[dict]) -> float:
+def evidence_diversity_score(confirmed_instances: list[dict[str, Any]]) -> float:
     """
     Returns a value in [0.0, 1.0]. Computes the distinct-value ratio across
     a few contextual dimensions (host, user, hour-of-day) and averages
