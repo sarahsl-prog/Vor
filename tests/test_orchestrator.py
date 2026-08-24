@@ -303,6 +303,101 @@ class TestUnderReviewBlocksSuppress:
 
 
 @pytest.mark.asyncio
+class TestProvisionalTierBlocksSuppress:
+    """
+    Same shape as TestUnderReviewBlocksSuppress, for the analogous gap:
+    CLASSIFIER_SYSTEM_PROMPT rule 6 already tells the model a
+    provisional-tier pattern hasn't earned autonomous suppression yet, but
+    nothing previously checked that in code. A non-compliant/hallucinating
+    model returning SUPPRESS for a pattern that hasn't graduated (fewer
+    than GRADUATION_THRESHOLD confirmed instances, or below MIN_DIVERSITY
+    — identity.py's two-part gate) sailed through untouched.
+    classify_alert() must now force UNCERTAIN regardless of what the model
+    says.
+    """
+
+    async def test_suppress_overridden_to_uncertain_when_provisional(
+        self, fake_firestore, baseline_alert, low_diversity_confirmed_instances
+    ):
+        # 3 instances meets the raw count threshold but fails
+        # MIN_DIVERSITY (same host/user/hour repeated) — stays
+        # provisional, per low_diversity_confirmed_instances' own
+        # docstring.
+        for instance in low_diversity_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        fake_model_response = {
+            "decision": "SUPPRESS",  # non-compliant: model ignored provisional tier
+            "matched_pattern_id": "test",
+            "uncertain_reason": "not_applicable",
+            "structural_deviations_found": [],
+            "reasoning": "Matches template.",
+        }
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(return_value=fake_model_response),
+        ):
+            result, _identity_key = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "UNCERTAIN"
+        assert result.uncertain_reason == "graduation_pending"
+        assert "provisional" in result.reasoning.lower()
+
+    async def test_escalate_while_provisional_left_untouched(
+        self, fake_firestore, baseline_alert, low_diversity_confirmed_instances
+    ):
+        """provisional tier only blocks SUPPRESS — it's not a blanket
+        override of every decision. A model that already says ESCALATE
+        needs no correction."""
+        for instance in low_diversity_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        fake_model_response = {
+            "decision": "ESCALATE",
+            "matched_pattern_id": "test",
+            "uncertain_reason": "not_applicable",
+            "structural_deviations_found": [],
+            "reasoning": "Escalating out of caution.",
+        }
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(return_value=fake_model_response),
+        ):
+            result, _identity_key = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "ESCALATE"
+        assert "graduation_pending" not in result.reasoning.lower()
+
+    async def test_suppress_not_overridden_once_graduated(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances
+    ):
+        """Confirms the override is scoped to provisional tier only — a
+        graduated (confirmed-tier) pattern's SUPPRESS must NOT be touched
+        by this check (TestReconciliation's
+        test_model_correctly_suppresses_no_override already covers this
+        end-to-end; this test isolates the provisional-tier check
+        specifically so a future regression here fails close to the
+        cause)."""
+        await _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances)
+
+        fake_model_response = {
+            "decision": "SUPPRESS",
+            "matched_pattern_id": "test",
+            "uncertain_reason": "not_applicable",
+            "structural_deviations_found": [],
+            "reasoning": "No deviations found, template matches.",
+        }
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(return_value=fake_model_response),
+        ):
+            result, _identity_key = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "SUPPRESS"
+        assert "graduation_pending" not in result.reasoning.lower()
+
+
+@pytest.mark.asyncio
 class TestSessionUniqueness:
     """
     Regression coverage for the session-reuse gap: session_id was

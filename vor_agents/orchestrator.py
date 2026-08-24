@@ -209,6 +209,32 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
             }
         )
 
+    if enrichment.get("tier") == "provisional" and classifier_output.decision == "SUPPRESS":
+        # Same shape and same reasoning as the under_review override just
+        # above, closing the analogous gap: CLASSIFIER_SYSTEM_PROMPT rule 6
+        # already tells the model a provisional-tier pattern (fewer than 3
+        # confirmed instances, or below MIN_DIVERSITY — see identity.py's
+        # two-part graduation gate) hasn't earned autonomous suppression
+        # yet, but nothing previously enforced that in code. A
+        # non-compliant or hallucinating model returning SUPPRESS for a
+        # pattern that hasn't graduated sailed through untouched. Checked
+        # after the under_review override (not merged into one condition)
+        # so a pattern that's both under_review AND provisional still gets
+        # the more specific "under_review" reason recorded — this block
+        # only fires if that first override didn't already flip the
+        # decision away from SUPPRESS.
+        classifier_output = classifier_output.model_copy(
+            update={
+                "decision": "UNCERTAIN",
+                "uncertain_reason": "graduation_pending",
+                "reasoning": (
+                    classifier_output.reasoning + " [Vör correctness override: pattern is still "
+                    "provisional-tier; SUPPRESS not allowed until it "
+                    "graduates to confirmed.]"
+                ),
+            }
+        )
+
     if precomputed_deviations:
         precomputed_fields = _deviation_field_names(precomputed_deviations)
         reported_fields = _deviation_field_names(classifier_output.structural_deviations_found)

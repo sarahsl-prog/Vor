@@ -185,12 +185,13 @@ These block or shape specific tasks above — resolve with the user before or du
 5. ~~**`confidence_used`**~~ — RESOLVED in Task 14: removed.
 6. **Blast radius table workflow** — `propose_blast_radius` returns inert records forever, by design. Confirm this manual-promotion workflow is intentional long-term, not a gap to close. **Still open.**
 
-### Task 21 (new, not in original report) — Enforce provisional-tier UNCERTAIN in code
-- [ ] Same shape as Task 4: `classify_alert()` doesn't check `enrichment["tier"] == "provisional"` after the model responds — only the prompt (rule 6) tells the model not to SUPPRESS a provisional pattern. A non-compliant/hallucinating model returning SUPPRESS for a provisional pattern sails through untouched today, same class of gap Task 4 closed for `under_review`.
-- [ ] User confirmed: yes, harden it now.
-- [ ] `vor_agents/orchestrator.py` (`classify_alert`) — add override: if `enrichment.get("tier") == "provisional"` (post any under_review-forced-provisional handling — check ordering against Task 4's existing override) and `decision == SUPPRESS` → force `UNCERTAIN` / `uncertain_reason=graduation_pending`.
-- [ ] Add tests mirroring Task 4's: SUPPRESS overridden when provisional; ESCALATE left untouched when provisional.
-- [ ] Commit: `Deterministically block SUPPRESS for provisional-tier patterns`
+### Task 21 (new, not in original report) — Enforce provisional-tier UNCERTAIN in code ✅ DONE
+- [x] Same shape as Task 4: `classify_alert()` didn't check `enrichment["tier"] == "provisional"` after the model responds — only the prompt (rule 6) told the model not to SUPPRESS a provisional pattern. A non-compliant/hallucinating model returning SUPPRESS for a provisional pattern sailed through untouched, same class of gap Task 4 closed for `under_review`.
+- [x] User confirmed: yes, harden it now.
+- [x] `vor_agents/orchestrator.py` (`classify_alert`) — added override right after Task 4's `under_review` override: if `enrichment.get("tier") == "provisional"` and `decision == "SUPPRESS"` → force `UNCERTAIN` / `uncertain_reason="graduation_pending"` (enum value already existed, unused until now). Checked after (not merged into) the `under_review` check so a pattern that's both `under_review` AND provisional keeps the more specific `under_review` reason.
+- [x] Added 3 tests mirroring Task 4's, in new `TestProvisionalTierBlocksSuppress`: SUPPRESS overridden when provisional (using the existing `low_diversity_confirmed_instances` fixture — 3 instances meets raw count but fails `MIN_DIVERSITY`, stays provisional); ESCALATE left untouched when provisional; SUPPRESS NOT overridden once graduated (isolates the new check from the pre-existing graduated-pattern coverage).
+- [x] Suite: 102 passed (was 99). ruff/black/mypy/bandit all clean, `pre-commit run --all-files` passes.
+- [x] Commit: `Deterministically block SUPPRESS for provisional-tier patterns`
 
 ---
 
