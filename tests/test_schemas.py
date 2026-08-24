@@ -7,7 +7,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from vor_agents.schemas import PubSubPushEnvelope
+from vor_agents.schemas import PubSubPushEnvelope, UncertainReason
 
 
 class TestPubSubPushEnvelope:
@@ -26,3 +26,8 @@ class TestPubSubPushEnvelope:
     def test_missing_message_rejected(self):
         with pytest.raises(ValidationError):
             PubSubPushEnvelope.model_validate({"subscription": "sub"})
+
+
+class TestUncertainReason:
+    def test_audit_failing_value_exists(self):
+        assert UncertainReason.AUDIT_FAILING == "audit_failing"

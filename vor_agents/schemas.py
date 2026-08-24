@@ -24,6 +24,7 @@ class UncertainReason(str, Enum):
     NO_HISTORY = "no_history"
     GRADUATION_PENDING = "graduation_pending"
     UNDER_REVIEW = "under_review"
+    AUDIT_FAILING = "audit_failing"
     MISSING_DATA = "missing_data"
     NOT_APPLICABLE = "not_applicable"
 
