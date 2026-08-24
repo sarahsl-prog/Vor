@@ -41,18 +41,17 @@ def evidence_diversity_score(confirmed_instances: list[dict]) -> float:
     # happened to land there regardless of format, so a malformed
     # timestamp like "2026-08-01T99:00:00Z" counted "99" as a real,
     # distinct hour, artificially inflating diversity on bad ingestion
-    # data. fromisoformat rejects that outright. Z-suffix (Zulu/UTC) is
-    # valid ISO 8601 but not accepted by fromisoformat before Python
-    # 3.11's relaxed parsing, so it's normalized to +00:00 first — cheap
-    # and correct either way, not relying on this project's exact
-    # Python version to accept it natively.
+    # data. fromisoformat rejects that outright. No Z-suffix normalization
+    # needed — this project requires Python >= 3.13 (pyproject.toml), and
+    # fromisoformat has accepted the "Z" (Zulu/UTC) suffix natively since
+    # 3.11's relaxed parsing.
     hours = set()
     for inst in confirmed_instances:
         ts = inst.get("timestamp")
         if not ts:
             continue
         try:
-            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(ts)
         except (ValueError, TypeError):
             continue
         hours.add(f"{dt.hour:02d}")
