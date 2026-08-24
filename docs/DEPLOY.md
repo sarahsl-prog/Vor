@@ -114,6 +114,20 @@ account` was passed in step 1), not `vor-scheduler` — that one is only
 for invoking this service and enqueueing Cloud Tasks, unrelated to what
 this service calls outward to Vertex AI.
 
+## 3b. needs_attention collection (no setup required)
+
+A pattern whose audits fail 3 times consecutively gets a doc written to
+the `needs_attention` Firestore collection (same project, same
+credentials already in use -- Firestore is schemaless, nothing to
+provision). **Nothing currently pushes this to a human** -- no
+dashboard, no alerting integration. Check it manually:
+
+```bash
+gcloud firestore documents list --collection-ids=needs_attention
+```
+
+Revisit once there's an actual notification channel to wire this into.
+
 ## 4. Wire /classify to a Pub/Sub push subscription
 
 ```bash
