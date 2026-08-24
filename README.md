@@ -104,7 +104,7 @@ Both inputs `select_audit_targets()` needed are now real:
   direction that reduces scrutiny, same asymmetry as the auditor's
   DOWNGRADE/RECOMMEND_UPGRADE split).
 
-`_fetch_all_suppressed_patterns()` in `orchestrator.py` is now
+`_fetch_all_confirmed_patterns()` in `orchestrator.py` is now
 implemented using both, plus a `last_reviewed_at` timestamp (newly stamped
 by `clear_under_review()` on every audit outcome, not just downgrades) to
 compute `days_since_last_review`. Never-audited patterns get a large
@@ -163,6 +163,21 @@ strategy per identity key is the likely fix once that data exists.
 **Also not resolved**: `/classify` has no actual trigger source wired up
 yet — nothing currently calls it. See DEPLOY.md step 4.
 
+## Model backend — resolved: Vertex AI, not the Gemini API key
+Both agents just pass a plain model string (`model="gemini-2.0-flash"`)
+to ADK's `Agent` — no explicit client construction in
+`classifier_agent.py`/`auditor_agent.py`. Backend selection is entirely
+environment-variable-driven, read by `google-genai` (an ADK dependency):
+`GOOGLE_GENAI_USE_VERTEXAI=true` + `GOOGLE_CLOUD_PROJECT` +
+`GOOGLE_CLOUD_LOCATION` route through Vertex AI using the caller's
+Application Default Credentials; their absence (with `GOOGLE_API_KEY`
+set instead) falls back to the Gemini Developer API. `.env` and
+`DEPLOY.md` are both configured for Vertex AI — matches "meant to be run
+in Google Cloud" from `CLAUDE.md`, and means the Cloud Run service
+authenticates to the model as itself (its own service account, granted
+`roles/aiplatform.user` — see DEPLOY.md step 3a) rather than carrying a
+separate API key as a secret to manage and rotate.
+
 ## Precomputed deviations — resolved: asymmetric reconciliation
 `precomputed_deviations` is no longer computed-and-discarded. After the
 classifier agent returns, its reported deviations are compared against
@@ -187,13 +202,15 @@ model failing to notice a real deviation can't silently result in an
 autonomous SUPPRESS.
 
 ## Known gaps — not yet resolved
-1. **Identity-key round-trip is fragile**: `_fetch_all_suppressed_patterns()`
-   reconstructs `identity_key` by splitting the Firestore doc ID on `"_"`
-   (`_doc_id()`'s join character). If any component of the key itself
-   contains an underscore (a rule ID or process name with one), this
-   split produces a wrong or over-segmented tuple. Not yet fixed — doc IDs
-   should probably use a safer delimiter or store the key as a separate
-   field instead of relying on the ID round-tripping.
+
+(Identity-key round-trip fragility — fixed. `_doc_id()` now hashes the
+identity_key tuple instead of joining it with `"_"`, and every write path
+stores `identity_key` as its own Firestore field; readers use that field
+instead of parsing the doc ID. See `docs/TODO-Aug15.md` Task 3. Existing
+Firestore data written before this change won't have the `identity_key`
+field — `_fetch_all_confirmed_patterns()` skips and logs a warning for
+any doc missing it rather than crashing, but a one-time migration/backfill
+is still needed before this matters in a real deployment.)
 
 ## Not yet built
 - Dataset generation for the 6 synthetic cases

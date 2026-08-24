@@ -3,6 +3,8 @@ Tests for vor_agents.blast_radius — table matching, the UNSCORED_DEFAULT
 safety net, and the MEDIUM/LOW human-review gate.
 """
 
+import pytest
+
 from vor_agents.blast_radius import (
     CRITICAL,
     HIGH,
@@ -91,3 +93,44 @@ class TestProposeBlastRadius:
             rationale="test",
         )
         assert BLAST_RADIUS_TABLE == before
+
+    def test_unknown_tier_rejected(self):
+        """Regression coverage: an unknown proposed_tier used to fall
+        through requires_review's `in ("MEDIUM", "LOW")` check as False,
+        silently treating a typo'd or made-up tier as not needing human
+        review — the dangerous direction. Must now raise."""
+        with pytest.raises(ValueError, match="Unknown blast-radius tier"):
+            propose_blast_radius(
+                identity_key=("rule", "proc.exe", "child.exe", "family"),
+                proposed_tier="SEVERE",
+                proposed_score=0.99,
+                cited_indicators=["test"],
+                rationale="test",
+            )
+
+    def test_score_outside_tier_range_rejected(self):
+        """A tier/score mismatch (e.g. LOW tier with a CRITICAL-range
+        score) used to be silently accepted, which could mislead a human
+        reviewer relying on requires_review's tier-only gate while the
+        score itself says something entirely different."""
+        with pytest.raises(ValueError, match="outside LOW's documented range"):
+            propose_blast_radius(
+                identity_key=("rule", "proc.exe", "child.exe", "family"),
+                proposed_tier="LOW",
+                proposed_score=CRITICAL,
+                cited_indicators=["test"],
+                rationale="test",
+            )
+
+    def test_score_at_tier_boundary_accepted(self):
+        """Boundary values are inclusive per BLAST_RADIUS_PLAYBOOK.md's
+        "0.90-1.0" style ranges — 0.90 is a valid CRITICAL score, not a
+        rejected edge case."""
+        proposal = propose_blast_radius(
+            identity_key=("rule", "proc.exe", "child.exe", "family"),
+            proposed_tier="CRITICAL",
+            proposed_score=0.90,
+            cited_indicators=["test"],
+            rationale="test",
+        )
+        assert proposal["proposed_score"] == 0.90

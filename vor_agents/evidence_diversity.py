@@ -10,6 +10,8 @@ gives that intuition a number instead of leaving it to the auditor's
 judgment alone.
 """
 
+from datetime import datetime
+
 
 def evidence_diversity_score(confirmed_instances: list[dict]) -> float:
     """
@@ -34,11 +36,26 @@ def evidence_diversity_score(confirmed_instances: list[dict]) -> float:
         if values:
             ratios.append(min(len(values) / n, 1.0))
 
-    hours = {
-        inst["timestamp"][11:13]
-        for inst in confirmed_instances
-        if inst.get("timestamp") and len(inst["timestamp"]) >= 13
-    }
+    # Parsed via datetime.fromisoformat, not a raw string slice — slicing
+    # [11:13] on any string >= 13 chars pulled whatever characters
+    # happened to land there regardless of format, so a malformed
+    # timestamp like "2026-08-01T99:00:00Z" counted "99" as a real,
+    # distinct hour, artificially inflating diversity on bad ingestion
+    # data. fromisoformat rejects that outright. Z-suffix (Zulu/UTC) is
+    # valid ISO 8601 but not accepted by fromisoformat before Python
+    # 3.11's relaxed parsing, so it's normalized to +00:00 first — cheap
+    # and correct either way, not relying on this project's exact
+    # Python version to accept it natively.
+    hours = set()
+    for inst in confirmed_instances:
+        ts = inst.get("timestamp")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        hours.add(f"{dt.hour:02d}")
     if hours:
         ratios.append(min(len(hours) / n, 1.0))
 

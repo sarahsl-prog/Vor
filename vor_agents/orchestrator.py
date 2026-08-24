@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
+from loguru import logger
 
 from .audit_targets import select_audit_targets
 from .auditor_agent import build_auditor_agent
@@ -21,11 +22,28 @@ from .enrichment import CONFIDENCE_COLLECTION, _doc_id, enrich
 from .evidence_diversity import evidence_diversity_score
 from .identity import diff_alert_against_template
 from .review_flag import clear_under_review, mark_under_review
-from .schemas import AuditorOutput, ClassifierOutput
+from .schemas import (
+    AuditorAction,
+    AuditorOutput,
+    ClassifierOutput,
+    Decision,
+    UncertainReason,
+)
 
 session_service = InMemorySessionService()  # swap for a persistent
 # SessionService in production;
 # fine for a hackathon demo
+
+
+class AgentOutputError(Exception):
+    """
+    Raised when _run_agent() can't turn a model response into a dict —
+    empty output, Markdown code fences, truncated JSON, or any other
+    non-JSON text. Wraps the underlying json.JSONDecodeError so callers
+    (classify_alert, audit_pattern) never see a raw stdlib exception, same
+    "never surface raw exceptions" standard as MalformedAlertError in
+    identity.py and AuditEnqueueError in task_queue.py.
+    """
 
 
 async def _run_agent(agent, prompt_text: str, session_id: str) -> dict:
@@ -43,11 +61,21 @@ async def _run_agent(agent, prompt_text: str, session_id: str) -> dict:
     ):
         if event.content and event.content.parts:
             for part in event.content.parts:
+                # getattr (not direct attribute access) so mypy sees an
+                # Any here rather than the declared str | None on
+                # part.text — the truthiness check already guarantees
+                # non-None/non-empty, but mypy can't narrow a separate
+                # attribute access through that guard.
                 text = getattr(part, "text", None)
-                if text is not None:
+                if text:
                     result_text += text
-    parsed: dict = json.loads(result_text)
-    return parsed
+    try:
+        parsed: dict = json.loads(result_text)
+        return parsed
+    except json.JSONDecodeError as exc:
+        raise AgentOutputError(
+            f"Model did not return valid JSON (length={len(result_text)}): {exc}"
+        ) from exc
 
 
 def _deviation_field_names(deviation_strings: list[str]) -> set[str]:
@@ -60,8 +88,26 @@ def _deviation_field_names(deviation_strings: list[str]) -> set[str]:
     template/observed values identically to the Python-computed version
     (repr formatting, quoting, etc.) — field name is the part that actually
     matters for reconciliation, not incidental text differences.
+
+    A string with no colon (the model not following the format at all,
+    e.g. "integrity_level observed High instead of Medium") previously got
+    treated as a whole-string field name, which can't match a real
+    template field and would never be found equal to anything on either
+    side of the reconciliation diff in classify_alert(). That's silently
+    fragile in the dangerous direction: it can make a real deviation look
+    unreported ("missed_by_model") when the model actually did report it,
+    just not in the expected format — skip and log instead of guessing.
     """
-    return {d.split(":", 1)[0].strip() for d in deviation_strings if d}
+    parsed = set()
+    for d in deviation_strings:
+        d = d.strip()
+        if not d:
+            continue
+        if ":" not in d:
+            logger.warning("Deviation string missing expected 'field:' prefix: {}", d)
+            continue
+        parsed.add(d.split(":", 1)[0].strip())
+    return parsed
 
 
 async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutput, tuple]:
@@ -91,7 +137,7 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
     endpoint) that wants to trigger an audit off a SUPPRESS decision needs
     a real identity key to hand to audit_pattern() — reconstructing one by
     parsing LLM-generated text would repeat the same fragile-split problem
-    already flagged for _fetch_all_suppressed_patterns(), just one layer
+    already flagged for _fetch_all_confirmed_patterns(), just one layer
     less reliable since it would also depend on the model formatting that
     string consistently.
     """
@@ -116,10 +162,50 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
     # let ADK accumulate conversation history into the same session,
     # silently biasing later calls with earlier turns. identity_key is
     # kept as a log-correlation prefix only, not as the dedup key.
-    result = await _run_agent(
-        classifier, prompt, session_id=f"classify_{'_'.join(identity_key)}_{uuid.uuid4()}"
-    )
-    classifier_output = ClassifierOutput.model_validate(result)
+    try:
+        result = await _run_agent(
+            classifier, prompt, session_id=f"classify_{'_'.join(identity_key)}_{uuid.uuid4()}"
+        )
+        classifier_output = ClassifierOutput.model_validate(result)
+    except AgentOutputError as exc:
+        # Model returned unparseable output (empty, Markdown-fenced,
+        # truncated JSON). This must not surface as a 500 to the /classify
+        # caller — degrade to UNCERTAIN, same "force a safe outcome in
+        # code" principle as every other trust decision in this system.
+        # No reconciliation to run below: there's no classifier_output to
+        # reconcile against.
+        logger.bind(identity_key=identity_key).error("Classifier output unparseable: {}", exc)
+        return (
+            ClassifierOutput(
+                decision=Decision.UNCERTAIN,
+                matched_pattern_id=None,
+                uncertain_reason=UncertainReason.MISSING_DATA,
+                structural_deviations_found=[],
+                reasoning=f"Classifier returned unparseable output: {exc}",
+            ),
+            identity_key,
+        )
+
+    if enrichment.get("under_review") and classifier_output.decision == "SUPPRESS":
+        # The classifier prompt already tells the model to treat
+        # under_review=True as provisional and avoid SUPPRESS, but nothing
+        # previously enforced that in code — a non-compliant or
+        # hallucinating model returning SUPPRESS anyway sailed through
+        # untouched. This is exactly the burst-replay race under_review
+        # was built to close (see review_flag.py): an audit is actively
+        # re-checking this pattern's evidence right now, so autonomously
+        # trusting a fresh SUPPRESS for it is the dangerous direction.
+        # Same "force the safe outcome in code, don't ask the model to
+        # reconsider" principle as every other override in this function.
+        classifier_output = classifier_output.model_copy(update={
+            "decision": "UNCERTAIN",
+            "uncertain_reason": "under_review",
+            "reasoning": (
+                classifier_output.reasoning
+                + " [Vör correctness override: pattern is under active "
+                "audit; SUPPRESS not allowed until review completes.]"
+            ),
+        })
 
     if precomputed_deviations:
         precomputed_fields = _deviation_field_names(precomputed_deviations)
@@ -187,34 +273,58 @@ async def audit_pattern(identity_key: tuple, pattern_data: dict, firestore_clien
       1. mark_under_review() — synchronous, BEFORE any LLM call, closes
          the burst-replay race window immediately
       2. Auditor agent call, separate context from the classifier
-      3. clear_under_review() atomically with the recorded decision
+      3. clear_under_review() atomically with the recorded decision,
+         ALWAYS — even if the auditor call itself failed (see except
+         below). Leaving under_review=True on failure would permanently
+         block autonomous suppression for this pattern until someone
+         manually clears the flag in Firestore; a failed audit degrading
+         to "reviewed, no action, try again next sweep" is the same
+         "force a safe outcome in code" principle used everywhere else in
+         this design, not a special case.
     """
     mark_under_review(identity_key, firestore_client)
 
-    # Fetch the full confirmed_instances list directly rather than trusting
-    # pattern_data to already contain it — callers like run_scheduled_sweep
-    # only pass summary fields (days_since_last_review, blast_radius, etc.)
-    # from select_audit_targets(), and the auditor prompt now depends on
-    # seeing every instance_id to be able to cite one.
-    doc = firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
-    confirmed_instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
+    try:
+        # Fetch the full confirmed_instances list directly rather than
+        # trusting pattern_data to already contain it — callers like
+        # run_scheduled_sweep only pass summary fields
+        # (days_since_last_review, blast_radius, etc.) from
+        # select_audit_targets(), and the auditor prompt now depends on
+        # seeing every instance_id to be able to cite one.
+        doc = firestore_client.collection(CONFIDENCE_COLLECTION).document(
+            _doc_id(identity_key)
+        ).get()
+        confirmed_instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
 
-    prompt = (
-        f"Pattern under review:\n{json.dumps(pattern_data, indent=2)}\n\n"
-        f"Confirmed instances (cite instance_id values from this list only "
-        f"if downgrading):\n{json.dumps(confirmed_instances, indent=2)}\n\n"
-        "Review this suppression decision per your instructions."
-    )
-    auditor = build_auditor_agent()
-    # Same unique-session-per-call rationale as classify_alert() above —
-    # each audit is a fresh, independent review, not a continuation of a
-    # prior one for this pattern.
-    result = await _run_agent(
-        auditor, prompt, session_id=f"audit_{'_'.join(identity_key)}_{uuid.uuid4()}"
-    )
-    decision = AuditorOutput.model_validate(result)
+        prompt = (
+            f"Pattern under review:\n{json.dumps(pattern_data, indent=2)}\n\n"
+            f"Confirmed instances (cite instance_id values from this list only "
+            f"if downgrading):\n{json.dumps(confirmed_instances, indent=2)}\n\n"
+            "Review this suppression decision per your instructions."
+        )
+        auditor = build_auditor_agent()
+        # Same unique-session-per-call rationale as classify_alert() above —
+        # each audit is a fresh, independent review, not a continuation of a
+        # prior one for this pattern.
+        result = await _run_agent(
+            auditor, prompt, session_id=f"audit_{'_'.join(identity_key)}_{uuid.uuid4()}"
+        )
+        decision = AuditorOutput.model_validate(result)
+    except Exception as exc:  # noqa: BLE001 — deliberately catch-all: any
+        # failure in this block (Firestore unavailable, model call failed,
+        # malformed JSON, invalid enum value) previously left
+        # under_review=True forever. Degrade to a no-op decision instead:
+        # the pattern is still reachable by the next sweep/classify-
+        # triggered audit, and the failure is visible in the decision's
+        # own reasoning text rather than silently swallowed.
+        logger.bind(identity_key=identity_key).exception("Audit failed")
+        decision = AuditorOutput(
+            action=AuditorAction.NO_ACTION,
+            reasoning=f"Audit failed with error: {exc!r}",
+        )
+    finally:
+        clear_under_review(identity_key, firestore_client, decision.model_dump())
 
-    clear_under_review(identity_key, firestore_client, decision.model_dump())
     return decision
 
 
@@ -240,8 +350,8 @@ def run_scheduled_sweep(firestore_client, enqueue_audit_fn, max_targets: int = 1
     config specifics (queue path, audit URL, OIDC service account) any
     more than it needs to know how firestore_client was constructed.
     """
-    all_suppressed = _fetch_all_suppressed_patterns(firestore_client)
-    targets = select_audit_targets(all_suppressed, max_targets=max_targets)
+    all_confirmed = _fetch_all_confirmed_patterns(firestore_client)
+    targets = select_audit_targets(all_confirmed, max_targets=max_targets)
 
     enqueued = []
     for pattern in targets:
@@ -251,11 +361,21 @@ def run_scheduled_sweep(firestore_client, enqueue_audit_fn, max_targets: int = 1
     return enqueued
 
 
-def _fetch_all_suppressed_patterns(firestore_client) -> list[dict]:
+def _fetch_all_confirmed_patterns(firestore_client) -> list[dict]:
     """
     Queries CONFIDENCE_COLLECTION for tier == "confirmed" docs and shapes
     them into what select_audit_targets() expects: days_since_last_review,
     evidence_diversity_score, blast_radius_estimate, identity_key.
+
+    Confirmed-tier only, deliberately — this was previously named
+    _fetch_all_suppressed_patterns(), which implied it covered every
+    autonomously-suppressed pattern including provisional ones. It never
+    did (provisional was never queried), and it doesn't need to:
+    CLASSIFIER_SYSTEM_PROMPT rule 6 (classifier_agent.py) never lets a
+    provisional-tier pattern autonomously SUPPRESS in the first place —
+    it always resolves to UNCERTAIN. The sweep exists to catch stale
+    evidence behind an autonomous SUPPRESS going unnoticed; a tier that
+    never produces one has nothing for it to catch.
 
     days_since_last_review: computed from last_reviewed_at (stamped by
     clear_under_review() on every audit, not just downgrades). A pattern
@@ -282,26 +402,49 @@ def _fetch_all_suppressed_patterns(firestore_client) -> list[dict]:
         if not instances:
             continue  # confirmed tier with no instances shouldn't occur, but skip defensively
 
+        # Read the identity_key field written by record_confirmed_negative
+        # / seed_template rather than parsing doc.id — doc IDs are now
+        # content hashes (see enrichment._doc_id's docstring) and never
+        # reversible. A doc predating this fix (or otherwise missing the
+        # field) is skipped defensively rather than crashing the whole
+        # sweep on one bad/legacy document; see docs/TODO-Aug15.md Task 3
+        # for the one-time migration this implies for any pre-existing
+        # Firestore data.
+        identity_key_field = data.get("identity_key")
+        if not identity_key_field:
+            logger.bind(doc_id=doc.id).warning(
+                "Confirmed-tier doc missing identity_key field, skipping "
+                "(pre-migration doc?)"
+            )
+            continue
+
         last_reviewed_at = data.get("last_reviewed_at")
         if last_reviewed_at:
             reviewed_dt = datetime.fromisoformat(last_reviewed_at)
-            days_since = (datetime.now(UTC) - reviewed_dt).days
+            # Clamped to >= 0: a last_reviewed_at in the future (clock
+            # skew between whatever wrote it and this read) would
+            # otherwise go negative and make select_audit_targets() rank
+            # this pattern BELOW patterns that are genuinely never-
+            # audited — the opposite of what "needs review" should mean.
+            # select_audit_targets() clamps too (defense in depth for
+            # direct callers of that function), but the sentinel-value
+            # comment below only makes sense if this is never negative to
+            # begin with.
+            days_since = max((datetime.now(UTC) - reviewed_dt).days, 0)
         else:
             days_since = 9999  # never audited — treat as maximally stale
 
-        patterns.append(
-            {
-                "identity_key": tuple(doc.id.split("_")),
-                "days_since_last_review": days_since,
-                "evidence_diversity_score": evidence_diversity_score(instances),
-                # Worst case across ALL instances, not just the first —
-                # different confirmed instances of the same pattern can carry
-                # different indicator values (e.g. different hosts with
-                # different privilege contexts), and blast radius is
-                # deliberately a worst-case estimate throughout this design.
-                "blast_radius_estimate": max(
-                    estimate_blast_radius(instance) for instance in instances
-                ),
-            }
-        )
+        patterns.append({
+            "identity_key": tuple(identity_key_field),
+            "days_since_last_review": days_since,
+            "evidence_diversity_score": evidence_diversity_score(instances),
+            # Worst case across ALL instances, not just the first —
+            # different confirmed instances of the same pattern can carry
+            # different indicator values (e.g. different hosts with
+            # different privilege contexts), and blast radius is
+            # deliberately a worst-case estimate throughout this design.
+            "blast_radius_estimate": max(
+                estimate_blast_radius(instance) for instance in instances
+            ),
+        })
     return patterns
