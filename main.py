@@ -20,16 +20,20 @@ Exposes the trigger paths from the hybrid cadence decision:
 See DEPLOY.md for how this actually gets deployed and secured.
 """
 
+import base64
+import binascii
+import json
 import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from google.cloud import firestore, tasks_v2
 from loguru import logger
+from pydantic import ValidationError as PydanticValidationError
 
 from vor_agents.identity import MalformedAlertError
 from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
-from vor_agents.schemas import AuditRequest, ClassifierRequest
+from vor_agents.schemas import AuditRequest, ClassifierRequest, PubSubPushEnvelope
 from vor_agents.task_queue import AuditEnqueueError, enqueue_audit
 
 app = FastAPI(title="Vör")
@@ -101,14 +105,69 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _decode_classify_body(raw_body: bytes) -> dict[str, Any]:
+    """
+    Detects whether /classify's raw request body is a Pub/Sub push
+    envelope ({"message": {"data": base64}, ...}) or a raw alert JSON
+    body (direct/test callers). Returns the alert dict either way -- NOT
+    yet validated against ClassifierRequest, the /classify handler does
+    that next with the same model either path took before this change.
+
+    Raises ValueError on invalid JSON, a non-object body, or a malformed
+    envelope (invalid base64, or base64 content that isn't a JSON object
+    once decoded) -- /classify's handler turns this into a 422, same as
+    every other malformed-input case in this codebase.
+    """
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Request body is not valid JSON: {exc}") from exc
+
+    if (
+        isinstance(body, dict)
+        and isinstance(body.get("message"), dict)
+        and "data" in body["message"]
+    ):
+        PubSubPushEnvelope.model_validate(
+            body
+        )  # raises PydanticValidationError -> caught by caller
+        try:
+            decoded = base64.b64decode(body["message"]["data"], validate=True)
+            alert = json.loads(decoded)
+        except (binascii.Error, json.JSONDecodeError) as exc:
+            raise ValueError(f"Malformed Pub/Sub push envelope: {exc}") from exc
+        if not isinstance(alert, dict):
+            raise ValueError("Decoded Pub/Sub message.data is not a JSON object")
+        return alert
+
+    if not isinstance(body, dict):
+        # ValueError, not TypeError: the caller catches ValueError
+        # alongside PydanticValidationError to turn every malformed-body
+        # case into a 422, same as the other raises in this function.
+        raise ValueError("Request body must be a JSON object")  # noqa: TRY004
+    return body
+
+
 @app.post("/classify")
-async def classify(payload: ClassifierRequest) -> dict[str, Any]:
+async def classify(request: Request) -> dict[str, Any]:
     """
-    payload is validated by FastAPI/pydantic before this body runs, same
-    pattern as /audit below — a missing identity field (previously a raw
-    KeyError-turned-500 out of pattern_identity_key()) or an invalid JSON
-    body (previously an unhandled JSONDecodeError) both return 422 instead.
+    Accepts either a raw alert JSON body (direct/test callers) or a
+    Pub/Sub push envelope (a push subscription calling this endpoint --
+    see docs/superpowers/specs/2026-08-24-pubsub-classify-trigger-design.md).
+    Either shape is unwrapped to a plain alert dict by
+    _decode_classify_body(), then validated against ClassifierRequest --
+    a missing identity field or malformed body returns 422 either way,
+    same guarantee the previous typed-body-param version gave, just with
+    the validation call made explicitly instead of by FastAPI's own
+    body-parsing layer.
     """
+    raw_body = await request.body()
+    try:
+        alert_body = _decode_classify_body(raw_body)
+        payload = ClassifierRequest.model_validate(alert_body)
+    except (ValueError, PydanticValidationError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     alert = payload.model_dump()
     client = get_firestore_client()
     result, identity_key = await classify_alert(alert, client)

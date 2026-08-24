@@ -4,6 +4,8 @@ Cloud Tasks wiring, since that's the one piece of real logic living in
 this file rather than in vor_agents/.
 """
 
+import base64
+import json as _json
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -357,3 +359,78 @@ def test_classify_allows_extra_context_fields(fake_firestore, fake_tasks_client,
     assert resp.status_code == 200
     assert captured_alert["integrity_level"] == "Medium"
     assert captured_alert["host"] == "SRV-01"
+
+
+def _pubsub_envelope(alert: dict) -> dict:
+    encoded = base64.b64encode(_json.dumps(alert).encode()).decode()
+    return {
+        "message": {"data": encoded, "messageId": "1"},
+        "subscription": "projects/p/subscriptions/s",
+    }
+
+
+def test_classify_accepts_pubsub_envelope(fake_firestore, monkeypatch):
+    identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+    alert = {
+        "detection_rule_id": "rule",
+        "parent_image": "w3wp.exe",
+        "child_image": "csc.exe",
+        "endpoint_family": "family",
+    }
+
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/classify", content=_json.dumps(_pubsub_envelope(alert)))
+
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "SUPPRESS"
+
+
+def test_classify_rejects_malformed_pubsub_envelope(fake_firestore):
+    body = {"message": {"data": "not-valid-base64!!!"}, "subscription": "s"}
+
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/classify", content=_json.dumps(body))
+
+    assert resp.status_code == 422
+
+
+def test_classify_rejects_envelope_whose_decoded_data_is_not_json(fake_firestore):
+    encoded = base64.b64encode(b"not json").decode()
+    body = {"message": {"data": encoded}, "subscription": "s"}
+
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/classify", content=_json.dumps(body))
+
+    assert resp.status_code == 422
+
+
+def test_classify_still_accepts_raw_alert_body(fake_firestore):
+    """Direct/test callers posting raw alert JSON (no Pub/Sub envelope)
+    keep working exactly as before this change."""
+    identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+    alert = {
+        "detection_rule_id": "rule",
+        "parent_image": "w3wp.exe",
+        "child_image": "csc.exe",
+        "endpoint_family": "family",
+    }
+
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/classify", json=alert)
+
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "SUPPRESS"
