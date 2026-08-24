@@ -412,6 +412,30 @@ def test_classify_rejects_envelope_whose_decoded_data_is_not_json(fake_firestore
     assert resp.status_code == 422
 
 
+def test_classify_rejects_envelope_whose_decoded_data_is_not_a_json_object(fake_firestore):
+    """message.data decodes to valid JSON that isn't a dict (a list here) --
+    must still 422, not proceed to ClassifierRequest validation."""
+    encoded = base64.b64encode(_json.dumps([1, 2, 3]).encode()).decode()
+    body = {"message": {"data": encoded}, "subscription": "s"}
+
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/classify", content=_json.dumps(body))
+
+    assert resp.status_code == 422
+
+
+def test_classify_rejects_non_object_raw_body(fake_firestore):
+    """A non-envelope raw body that IS valid JSON but isn't a JSON object
+    at all (no `message` wrapper) -- must 422 via the final catch-all in
+    _decode_classify_body(), not raise unhandled out of model_validate."""
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/classify", content=_json.dumps([1, 2, 3]))
+
+    assert resp.status_code == 422
+
+
 def test_classify_still_accepts_raw_alert_body(fake_firestore):
     """Direct/test callers posting raw alert JSON (no Pub/Sub envelope)
     keep working exactly as before this change."""
