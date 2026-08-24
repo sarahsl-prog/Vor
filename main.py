@@ -248,15 +248,19 @@ async def audit(payload: AuditRequest) -> dict[str, Any]:
 
     audit_pattern() itself already degrades model/parsing failures to a
     logged NO_ACTION decision (see orchestrator.py's try/except/finally)
-    rather than raising — but mark_under_review() (before that try block)
-    and the invalidate_instances() rebuild inside clear_under_review()
-    (in its finally block) are NOT covered by it, so a Firestore write
-    failure or malformed stored evidence can still raise out of this call.
-    Split those on the same "retryable vs permanent" line Cloud Tasks
-    itself cares about: a transient Firestore/network error is exactly
-    what its retry budget exists for (500, let it retry); malformed data
-    already in Firestore will fail identically on every retry (422,
-    correctness bug for a human to fix, not something retrying helps).
+    rather than raising. clear_under_review()'s own read of the current
+    failure_count (in its finally block, on every call) is ALSO handled
+    internally now — a read failure there returns a -1 sentinel rather
+    than raising, so it can't re-strand under_review=True either. What's
+    still NOT covered: mark_under_review() (before the try block) and the
+    invalidate_instances() rebuild inside clear_under_review()'s DOWNGRADE
+    branch (also in the finally block) can still raise out of this call on
+    a Firestore write failure or malformed stored evidence. Split those on
+    the same "retryable vs permanent" line Cloud Tasks itself cares about:
+    a transient Firestore/network error is exactly what its retry budget
+    exists for (500, let it retry); malformed data already in Firestore
+    will fail identically on every retry (422, correctness bug for a
+    human to fix, not something retrying helps).
     """
     client = get_firestore_client()
     try:

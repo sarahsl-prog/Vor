@@ -25,7 +25,12 @@ from .classifier_agent import build_classifier_agent
 from .enrichment import CONFIDENCE_COLLECTION, _doc_id, enrich
 from .evidence_diversity import evidence_diversity_score
 from .identity import diff_alert_against_template
-from .review_flag import clear_under_review, mark_under_review, record_needs_attention
+from .review_flag import (
+    clear_under_review,
+    mark_under_review,
+    record_needs_attention,
+    resolve_needs_attention,
+)
 from .schemas import (
     AuditorAction,
     AuditorOutput,
@@ -341,7 +346,10 @@ async def audit_pattern(
     crossed, writes a needs_attention doc AND classify_alert() forces
     UNCERTAIN for this pattern going forward (see that function's
     failure_count override) -- both the in-band and out-of-band halves
-    of the escalation design.
+    of the escalation design. On the success path, also resolves any
+    needs_attention doc left over from a prior escalation (see
+    review_flag.resolve_needs_attention) -- the recovery half of the
+    same design.
     """
     mark_under_review(identity_key, firestore_client)
     audit_failed = False
@@ -411,6 +419,24 @@ async def audit_pattern(
             # clear_under_review() write above, which already happened.
             logger.bind(identity_key=identity_key).error(
                 "Failed to record needs_attention doc: {}", record_exc
+            )
+
+    if not audit_failed:
+        # Counterpart to the escalation write above: a successful audit
+        # for a pattern that previously escalated should mark its
+        # needs_attention doc resolved, so a human looking at that
+        # collection can tell a live escalation from a resolved one (see
+        # review_flag.resolve_needs_attention's docstring). Wrapped in its
+        # own try/except here too, mirroring record_needs_attention()'s
+        # call above, even though resolve_needs_attention() already never
+        # raises on its own — a failure to resolve it must never affect
+        # this function's return value either way.
+        try:
+            resolve_needs_attention(identity_key, firestore_client)
+        except Exception as resolve_exc:  # noqa: BLE001 — deliberate,
+            # see comment above.
+            logger.bind(identity_key=identity_key).error(
+                "Failed to resolve needs_attention doc: {}", resolve_exc
             )
 
     return decision

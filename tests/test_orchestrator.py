@@ -439,9 +439,15 @@ class TestAuditPatternFailureHandling:
     ANY outcome, success or failure.
     """
 
-    async def test_run_agent_exception_clears_under_review_and_stamps_review_time(
+    async def test_run_agent_exception_clears_under_review_but_does_not_stamp_review_time(
         self, fake_firestore, diverse_confirmed_instances
     ):
+        """A failed audit clears under_review (the original stuck-flag
+        fix) but must NOT stamp last_reviewed_at -- a failed audit is not
+        a genuine review, and stamping it would make select_audit_targets()
+        rank this pattern as freshly-reviewed instead of increasingly
+        stale (see final review finding #1 / clear_under_review()'s
+        docstring)."""
         identity_key = ("TestRule", "parent.exe", "child.exe", "testfamily")
         for instance in diverse_confirmed_instances:
             record_confirmed_negative(instance, fake_firestore)
@@ -458,7 +464,7 @@ class TestAuditPatternFailureHandling:
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
         data = doc.to_dict()
         assert data["under_review"] is False
-        assert data["last_reviewed_at"] is not None
+        assert "last_reviewed_at" not in data
 
     async def test_invalid_model_output_clears_under_review(
         self, fake_firestore, diverse_confirmed_instances
@@ -553,6 +559,67 @@ class TestFailureEscalation:
             .get()
         )
         assert not doc.exists
+
+    async def test_success_after_escalation_resolves_needs_attention_doc(
+        self, fake_firestore, monkeypatch
+    ):
+        """The counterpart to escalation: once a needs_attention doc has
+        been written (3 consecutive failures), a subsequent successful
+        audit must mark it resolved -- see final review finding #2. The
+        doc must persist (a human still needs to be able to see it
+        happened) but carry a resolved_at stamp and a zeroed
+        failure_count so a live escalation can be told apart from a
+        resolved one."""
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        for _ in range(3):
+            await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+
+        doc_ref = fake_firestore.collection(NEEDS_ATTENTION_COLLECTION).document(
+            _doc_id(identity_key)
+        )
+        assert doc_ref.get().exists
+        assert "resolved_at" not in doc_ref.get().to_dict()
+
+        async def _ok(*args, **kwargs):
+            return {
+                "action": "NO_ACTION",
+                "invalidated_instance_ids": [],
+                "concerns_found": [],
+                "reasoning": "clean",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _ok)
+        await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+        resolved = doc_ref.get().to_dict()
+        assert "resolved_at" in resolved
+        assert resolved["failure_count"] == 0
+
+    async def test_needs_attention_write_failure_never_propagates_or_blocks_clear(
+        self, fake_firestore, monkeypatch
+    ):
+        """Directly tests the plan's headline safety constraint (final
+        review finding #4): a failure to write the needs_attention doc on
+        the 3rd consecutive failure must never raise out of
+        audit_pattern(), and must never prevent clear_under_review()'s own
+        write -- the confidence doc must still land with
+        under_review=False / failure_count=3."""
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        def _boom_record(*args, **kwargs):
+            raise RuntimeError("firestore write failed")
+
+        monkeypatch.setattr("vor_agents.orchestrator.record_needs_attention", _boom_record)
+
+        for _ in range(2):
+            await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+        await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)  # 3rd -- no raise
+
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
+        data = doc.to_dict()
+        assert data["under_review"] is False
+        assert data["failure_count"] == 3
 
 
 @pytest.mark.asyncio

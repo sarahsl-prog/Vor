@@ -31,9 +31,15 @@ throughout this codebase (`under_review`/provisional overrides in
 ## Non-goals
 
 - Retrying a failed audit sooner than the normal sweep/classify-trigger
-  cadence would. Failures still resolve the same way they do today
-  (clear `under_review`, wait for the next natural trigger) — this spec
-  only adds tracking and escalation on top, not a faster retry loop.
+  cadence would. This spec only adds tracking and escalation on top, not
+  a faster retry loop. Note this is narrower than it first sounds: once a
+  pattern crosses the escalation threshold, `classify_alert()` forces
+  `UNCERTAIN` for it (see below), which means `/classify`'s
+  SUPPRESS-only audit trigger stops firing for that pattern entirely —
+  the classify-trigger path is genuinely removed, not just left at its
+  normal cadence. The weekly sweep remains as the recovery path (see the
+  `select_audit_targets()` interaction called out below); a human
+  clearing the pattern manually is the other.
 - Alerting infrastructure (PagerDuty, email, Slack). "Visible to a human"
   here means a Firestore record + log line a human dashboard/query can
   surface — wiring an actual notification channel is a separate,
@@ -206,6 +212,17 @@ just a differently-labeled `ERROR` in practice.
 - No actual notification channel — `needs_attention` docs are inert until
   someone builds a way to surface them (dashboard, scheduled digest,
   alerting integration).
-- Whether `failure_count >= 3` should also affect `select_audit_targets()`
-  priority (should a failing pattern be *more* or *less* likely to be
-  swept again soon?) is unaddressed — left as today's unweighted behavior.
+- Resolved, not left open: `failure_count >= 3` DOES affect
+  `select_audit_targets()` priority, as of this implementation.
+  `clear_under_review()` no longer stamps `last_reviewed_at` when
+  `audit_failed=True` — a failed audit is not a genuine review, so it no
+  longer counts as one for staleness purposes. Since
+  `select_audit_targets()` derives `days_since_last_review` from that
+  stamp, a repeatedly-failing pattern's `last_reviewed_at` stays frozen
+  at whenever it last succeeded (or absent, if it never has), and it
+  grows steadily *more* stale — and therefore *higher* sweep priority —
+  with every failed audit, instead of being reset to the bottom of the
+  list each time. This was necessary, not optional: without it, the
+  classify-trigger removal above and this stamping behavior would have
+  combined to actively bury a failing pattern behind both of its own
+  recovery paths at once.
