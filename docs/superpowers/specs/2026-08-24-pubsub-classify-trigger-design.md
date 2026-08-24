@@ -76,9 +76,14 @@ suite). No separate `/pubsub/classify` route.
 - This is a real (small) behavior change from today's typed-body param:
   FastAPI's automatic body validation before the handler runs no longer
   applies at the route-declaration level — validation is called
-  explicitly inside the handler instead, and its `ValidationError` is
-  converted to the same 422 shape FastAPI would have produced, so callers
-  can't tell the difference.
+  explicitly inside the handler instead. Both paths still 422 on
+  malformed input, but the response body shape changed: FastAPI's own
+  handler would have produced a structured
+  `{"detail": [{"loc": [...], "msg": ..., "type": ...}]}` list; the
+  handler now returns `detail=str(exc)`, a single string. Nothing
+  consumes this body today (Pub/Sub ignores it, tests assert only status
+  codes), so it's a safe change, but callers *can* tell the difference if
+  they ever start parsing it.
 
 ### DEPLOY.md additions
 

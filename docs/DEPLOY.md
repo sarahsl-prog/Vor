@@ -122,8 +122,16 @@ gcloud pubsub topics create vor-alerts
 gcloud pubsub subscriptions create vor-alerts-sub \
   --topic vor-alerts \
   --push-endpoint "https://YOUR_CLOUD_RUN_URL/classify" \
-  --push-auth-service-account "vor-scheduler@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+  --push-auth-service-account "vor-scheduler@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --ack-deadline 600
 ```
+
+`--ack-deadline 600` (Pub/Sub's max) is required, not cosmetic: `/classify`
+synchronously calls `classify_alert()`, which does a Firestore read plus a
+Gemini call via ADK, and that round-trip routinely exceeds the 10s default
+ack deadline -- without this flag Pub/Sub redelivers a slow-but-successful
+request as if it failed. Cloud Run's own request timeout (step 1) is still
+the outer bound on how long a single attempt can run.
 
 Reuses the `vor-scheduler` service account created in step 2 -- it already
 has `roles/run.invoker` on this service, same reuse pattern as the Cloud
