@@ -1,6 +1,6 @@
 # Pub/Sub Trigger for /classify Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Let `POST /classify` accept a Pub/Sub push envelope (base64-encoded alert JSON inside `message.data`) in addition to the raw alert JSON body it already accepts, so a Pub/Sub push subscription can call it directly.
 
@@ -28,7 +28,7 @@
 **Interfaces:**
 - Produces: `PubSubMessage(BaseModel)` with `data: str`; `PubSubPushEnvelope(BaseModel)` with `message: PubSubMessage`. Consumed by Task 2's `_decode_classify_body()`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/test_schemas.py`:
 
@@ -63,12 +63,12 @@ class TestPubSubPushEnvelope:
             PubSubPushEnvelope.model_validate({"subscription": "sub"})
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_schemas.py -v`
 Expected: `ImportError: cannot import name 'PubSubPushEnvelope' from 'vor_agents.schemas'`
 
-- [ ] **Step 3: Add the schemas**
+- [x] **Step 3: Add the schemas**
 
 Add to `vor_agents/schemas.py`, after the `AuditRequest` class:
 
@@ -95,17 +95,17 @@ class PubSubPushEnvelope(BaseModel):
     message: PubSubMessage
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_schemas.py -v`
 Expected: all 3 tests PASS.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy vor_agents/ main.py`
 Expected: all pass, no regressions.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/schemas.py tests/test_schemas.py
@@ -124,7 +124,7 @@ git commit -m "Add PubSubPushEnvelope/PubSubMessage schemas"
 - Consumes: `PubSubPushEnvelope`, `PubSubMessage` (Task 1).
 - Produces: `_decode_classify_body(raw_body: bytes) -> dict[str, Any]` (module-private helper in `main.py`) -- returns the alert dict regardless of which shape the body was, or raises `ValueError` on anything malformed.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_main.py` (alongside the existing `/classify` tests -- keep every existing test in the file as-is):
 
@@ -201,12 +201,12 @@ def test_classify_still_accepts_raw_alert_body(fake_firestore):
 
 `_suppress_result()`, `AsyncMock`, `patch`, `TestClient`, `main` are already imported/defined earlier in `tests/test_main.py` -- reuse them, don't redefine.
 
-- [ ] **Step 2: Run the new tests to verify they fail**
+- [x] **Step 2: Run the new tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_main.py -k pubsub -v`
 Expected: `test_classify_accepts_pubsub_envelope` and the malformed-envelope tests currently return 422 (today's `ClassifierRequest`-typed body param rejects the envelope shape as missing required fields) or otherwise don't match expectations -- confirms current behavior doesn't yet support the envelope.
 
-- [ ] **Step 3: Rewrite `/classify`'s handler in `main.py`**
+- [x] **Step 3: Rewrite `/classify`'s handler in `main.py`**
 
 Add to the imports at the top of `main.py`:
 
@@ -294,17 +294,17 @@ async def classify(request: Request) -> dict[str, Any]:
     return result.model_dump()
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_main.py -v`
 Expected: all tests PASS, including every pre-existing `/classify` test (missing-field 422, invalid-JSON 422, extra-fields-allowed, enqueue-on-suppress, dedup, enqueue-failure-doesn't-fail-response) plus the 4 new Pub/Sub tests.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy vor_agents/ main.py`
 Expected: all pass, no regressions.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add main.py tests/test_main.py
@@ -321,7 +321,7 @@ git commit -m "Accept a Pub/Sub push envelope on /classify"
 **Interfaces:**
 - None (documentation only).
 
-- [ ] **Step 1: Insert a new section before step 4 (`/classify`'s trigger source), replacing that section's "still open" framing**
+- [x] **Step 1: Insert a new section before step 4 (`/classify`'s trigger source), replacing that section's "still open" framing**
 
 Replace the existing step 4 section (`## 4. The /classify endpoint itself`) with:
 
@@ -361,11 +361,11 @@ will retry and 422 until it ages out of the subscription's retention
 window. Revisit once real traffic volume exists to calibrate against.
 ```
 
-- [ ] **Step 2: Verify the doc renders sensibly**
+- [x] **Step 2: Verify the doc renders sensibly**
 
 Read the file back and confirm the new section sits in step 4's place, with consistent heading levels and no broken code fences, and that it no longer says "isn't wired to a trigger source yet."
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/DEPLOY.md
@@ -376,7 +376,7 @@ git commit -m "Document Pub/Sub topic and push subscription for /classify"
 
 ## Final verification
 
-- [ ] Run `.venv/bin/python -m pytest -v` -- full suite passes.
-- [ ] Run `.venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py` -- all clean.
-- [ ] Confirm `git log --oneline -3` shows one commit per task.
-- [ ] Update `docs/TODO-Aug24.md` Task 1 checkbox to done, referencing the commits.
+- [x] Run `.venv/bin/python -m pytest -v` -- full suite passes.
+- [x] Run `.venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py` -- all clean.
+- [x] Confirm `git log --oneline -3` shows one commit per task.
+- [x] Update `docs/TODO-Aug24.md` Task 1 checkbox to done, referencing the commits.

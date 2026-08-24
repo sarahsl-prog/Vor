@@ -14,8 +14,9 @@ outstanding-decisions discussion.
 ## Features not implemented
 
 ### Task 1 — Wire a real trigger source for `/classify`
-- [ ] Nothing currently calls `POST /classify`. DEPLOY.md step 4 and README both flag this as
-  open; confirmed — no webhook/Pub/Sub/Hayabusa-ingest code anywhere in the repo.
+- [x] Nothing currently calls `POST /classify`. DEPLOY.md step 4 and README both flag this as
+  open; confirmed — no webhook/Pub/Sub/Hayabusa-ingest code anywhere in the repo. **Resolved** —
+  see `docs/superpowers/plans/2026-08-24-pubsub-classify-trigger.md`.
 - [x] **Decision (2026-08-24): Pub/Sub push subscription.** Ingest source publishes to a topic;
   a push subscription calls `/classify` with OIDC auth, same shape as `/sweep`/`/audit`'s
   existing Cloud Run IAM gating.
