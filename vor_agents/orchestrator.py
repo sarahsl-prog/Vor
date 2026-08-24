@@ -197,15 +197,43 @@ async def classify_alert(alert: dict, firestore_client) -> tuple[ClassifierOutpu
         # trusting a fresh SUPPRESS for it is the dangerous direction.
         # Same "force the safe outcome in code, don't ask the model to
         # reconsider" principle as every other override in this function.
-        classifier_output = classifier_output.model_copy(update={
-            "decision": "UNCERTAIN",
-            "uncertain_reason": "under_review",
-            "reasoning": (
-                classifier_output.reasoning
-                + " [Vör correctness override: pattern is under active "
-                "audit; SUPPRESS not allowed until review completes.]"
-            ),
-        })
+        classifier_output = classifier_output.model_copy(
+            update={
+                "decision": "UNCERTAIN",
+                "uncertain_reason": "under_review",
+                "reasoning": (
+                    classifier_output.reasoning
+                    + " [Vör correctness override: pattern is under active "
+                    "audit; SUPPRESS not allowed until review completes.]"
+                ),
+            }
+        )
+
+    if enrichment.get("tier") == "provisional" and classifier_output.decision == "SUPPRESS":
+        # Same shape and same reasoning as the under_review override just
+        # above, closing the analogous gap: CLASSIFIER_SYSTEM_PROMPT rule 6
+        # already tells the model a provisional-tier pattern (fewer than 3
+        # confirmed instances, or below MIN_DIVERSITY — see identity.py's
+        # two-part graduation gate) hasn't earned autonomous suppression
+        # yet, but nothing previously enforced that in code. A
+        # non-compliant or hallucinating model returning SUPPRESS for a
+        # pattern that hasn't graduated sailed through untouched. Checked
+        # after the under_review override (not merged into one condition)
+        # so a pattern that's both under_review AND provisional still gets
+        # the more specific "under_review" reason recorded — this block
+        # only fires if that first override didn't already flip the
+        # decision away from SUPPRESS.
+        classifier_output = classifier_output.model_copy(
+            update={
+                "decision": "UNCERTAIN",
+                "uncertain_reason": "graduation_pending",
+                "reasoning": (
+                    classifier_output.reasoning + " [Vör correctness override: pattern is still "
+                    "provisional-tier; SUPPRESS not allowed until it "
+                    "graduates to confirmed.]"
+                ),
+            }
+        )
 
     if precomputed_deviations:
         precomputed_fields = _deviation_field_names(precomputed_deviations)
@@ -291,9 +319,9 @@ async def audit_pattern(identity_key: tuple, pattern_data: dict, firestore_clien
         # (days_since_last_review, blast_radius, etc.) from
         # select_audit_targets(), and the auditor prompt now depends on
         # seeing every instance_id to be able to cite one.
-        doc = firestore_client.collection(CONFIDENCE_COLLECTION).document(
-            _doc_id(identity_key)
-        ).get()
+        doc = (
+            firestore_client.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
+        )
         confirmed_instances = doc.to_dict().get("confirmed_instances", []) if doc.exists else []
 
         prompt = (
@@ -413,8 +441,7 @@ def _fetch_all_confirmed_patterns(firestore_client) -> list[dict]:
         identity_key_field = data.get("identity_key")
         if not identity_key_field:
             logger.bind(doc_id=doc.id).warning(
-                "Confirmed-tier doc missing identity_key field, skipping "
-                "(pre-migration doc?)"
+                "Confirmed-tier doc missing identity_key field, skipping " "(pre-migration doc?)"
             )
             continue
 
@@ -434,17 +461,19 @@ def _fetch_all_confirmed_patterns(firestore_client) -> list[dict]:
         else:
             days_since = 9999  # never audited — treat as maximally stale
 
-        patterns.append({
-            "identity_key": tuple(identity_key_field),
-            "days_since_last_review": days_since,
-            "evidence_diversity_score": evidence_diversity_score(instances),
-            # Worst case across ALL instances, not just the first —
-            # different confirmed instances of the same pattern can carry
-            # different indicator values (e.g. different hosts with
-            # different privilege contexts), and blast radius is
-            # deliberately a worst-case estimate throughout this design.
-            "blast_radius_estimate": max(
-                estimate_blast_radius(instance) for instance in instances
-            ),
-        })
+        patterns.append(
+            {
+                "identity_key": tuple(identity_key_field),
+                "days_since_last_review": days_since,
+                "evidence_diversity_score": evidence_diversity_score(instances),
+                # Worst case across ALL instances, not just the first —
+                # different confirmed instances of the same pattern can carry
+                # different indicator values (e.g. different hosts with
+                # different privilege contexts), and blast radius is
+                # deliberately a worst-case estimate throughout this design.
+                "blast_radius_estimate": max(
+                    estimate_blast_radius(instance) for instance in instances
+                ),
+            }
+        )
     return patterns

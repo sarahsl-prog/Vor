@@ -26,6 +26,7 @@ def select_audit_targets(all_suppressed_patterns: list[dict], max_targets: int =
     pattern's priority below zero and rank it under patterns that are
     genuinely never-audited, the opposite of "needs attention."
     """
+
     def priority(pattern: dict) -> tuple[float, str]:
         days_since = max(pattern["days_since_last_review"], 0)
         score = (
