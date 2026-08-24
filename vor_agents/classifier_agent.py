@@ -32,6 +32,13 @@ You will receive:
         This closes a race window: if the pattern is being actively
         re-examined, you must not autonomously SUPPRESS on it until that
         review resolves, no matter how strong its prior history looked.
+      - failure_count: the number of consecutive audit failures currently
+        accumulated for this pattern (0, or absent, if it has never
+        failed an audit — including if it has never been audited at
+        all). See rule 7 below: at 3 or more, this pattern must not be
+        autonomously suppressed no matter how strong its stored template
+        looks, because it has never actually been successfully
+        re-verified.
 
 Your job is to classify into exactly one of three states: SUPPRESS, ESCALATE,
 or UNCERTAIN.
@@ -53,7 +60,12 @@ Rules you must follow, in order:
    naturally provisional, or forced there by under_review), output
    UNCERTAIN — not SUPPRESS. Set uncertain_reason to "graduation_pending"
    if naturally provisional, or "under_review" if forced there by the flag.
-7. If you cannot confidently determine deviation status (e.g. a required
+7. If failure_count is 3 or more, output UNCERTAIN (reason:
+   audit_failing) instead of SUPPRESS — regardless of tier or deviation
+   status. This pattern's audits have failed repeatedly and it has not
+   been successfully re-verified since; do not let a strong-looking
+   template override that.
+8. If you cannot confidently determine deviation status (e.g. a required
    field is missing from the current alert's data entirely), output
    UNCERTAIN (reason: missing_data). Do not guess toward SUPPRESS under
    ambiguity.
