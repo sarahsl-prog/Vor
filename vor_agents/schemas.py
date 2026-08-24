@@ -82,6 +82,28 @@ class AuditRequest(BaseModel):
     pattern_data: dict[str, Any]
 
 
+class PubSubMessage(BaseModel):
+    """The `message` object inside a Pub/Sub push request body. `data` is
+    base64-encoded -- Pub/Sub always encodes the published message body
+    this way, regardless of what the publisher originally sent. Other
+    fields Pub/Sub includes (messageId, publishTime, attributes) aren't
+    read by anything here, so they're not modeled -- extra="allow" isn't
+    even needed since pydantic ignores unrecognized fields by default."""
+
+    data: str
+
+
+class PubSubPushEnvelope(BaseModel):
+    """Body shape Pub/Sub actually POSTs to a push endpoint:
+    {"message": {"data": "<base64>", ...}, "subscription": "..."}. Used
+    only to DETECT this shape in /classify -- see main.py's
+    _decode_classify_body(). The alert JSON itself lives base64-encoded
+    inside message.data, decoded and re-validated against
+    ClassifierRequest separately, not by this model."""
+
+    message: PubSubMessage
+
+
 class AuditorAction(str, Enum):
     NO_ACTION = "NO_ACTION"
     DOWNGRADE = "DOWNGRADE"
