@@ -7,6 +7,7 @@ from vor_agents.enrichment import (
     record_confirmed_negative,
     seed_template,
 )
+from vor_agents.identity import pattern_identity_key
 
 
 class TestEnrich:
@@ -191,3 +192,24 @@ class TestInvalidateInstances:
         # Remove all but one instance
         result = invalidate_instances(key, ["i1", "i2", "i3", "i4"], fake_firestore)
         assert result["tier"] == "provisional"
+
+
+class TestEnrichFailureCount:
+    def test_enrich_surfaces_failure_count(self, fake_firestore, baseline_alert):
+        from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+
+        record_confirmed_negative(baseline_alert, fake_firestore)
+        identity_key = pattern_identity_key(baseline_alert)
+        doc_ref = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
+        doc_ref.set({"failure_count": 2}, merge=True)
+
+        result = enrich(baseline_alert, fake_firestore)
+
+        assert result["failure_count"] == 2
+
+    def test_enrich_defaults_failure_count_to_zero(self, fake_firestore, baseline_alert):
+        record_confirmed_negative(baseline_alert, fake_firestore)
+
+        result = enrich(baseline_alert, fake_firestore)
+
+        assert result["failure_count"] == 0
