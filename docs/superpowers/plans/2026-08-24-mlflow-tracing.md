@@ -28,7 +28,7 @@
 **Interfaces:**
 - Produces: `_FakeDocRef.delete() -> None`. Consumed by Task 4's `replay_pending_traces()` tests.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/test_conftest_fakes.py` (create it if the blast-radius-firestore plan hasn't already; if it exists, add this test to it):
 
@@ -42,12 +42,12 @@ def test_fake_doc_ref_delete_removes_the_doc(fake_firestore):
     assert not doc.exists
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_conftest_fakes.py -k delete -v`
 Expected: `AttributeError: '_FakeDocRef' object has no attribute 'delete'`
 
-- [ ] **Step 3: Add `.delete()` to `_FakeDocRef`**
+- [x] **Step 3: Add `.delete()` to `_FakeDocRef`**
 
 In `tests/conftest.py`, add to the existing `_FakeDocRef` class:
 
@@ -56,12 +56,12 @@ In `tests/conftest.py`, add to the existing `_FakeDocRef` class:
         self._store.pop(self._doc_id, None)
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_conftest_fakes.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Add the `mlflow` dependency**
+- [x] **Step 5: Add the `mlflow` dependency**
 
 Run: `uv pip install mlflow --python .venv/bin/python`
 
@@ -77,12 +77,12 @@ Add the printed version to `requirements.txt`, alphabetically among the existing
 mlflow==<installed-version>
 ```
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: same pass count as before plus 1 new test — nothing else uses `.delete()` or `mlflow` yet.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tests/conftest.py tests/test_conftest_fakes.py requirements.txt
@@ -101,7 +101,7 @@ git commit -m "FakeFirestoreClient: add delete(); pin mlflow dependency"
 - Consumes: `fake_firestore` fixture, `_FakeDocRef.delete()` (Task 1).
 - Produces: `PENDING_TRACES_COLLECTION = "pending_traces"`, `TracingError(Exception)`, `log_classification_trace(alert, enrichment, classifier_output, overrides_fired: list[str], firestore_client) -> None`, `log_audit_trace(identity_key, pattern_data, auditor_output, audit_failed: bool, firestore_client) -> None`. Both consumed by Task 3 (`orchestrator.py`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_tracing.py`:
 
@@ -219,12 +219,12 @@ class TestLogAuditTrace:
         assert docs[0].to_dict()["run_data"]["audit_failed"] is True
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_tracing.py -v`
 Expected: `ModuleNotFoundError: No module named 'vor_agents.tracing'`
 
-- [ ] **Step 3: Write `vor_agents/tracing.py`**
+- [x] **Step 3: Write `vor_agents/tracing.py`**
 
 ```python
 """
@@ -354,17 +354,17 @@ def log_audit_trace(
     _log_run("audit", run_data, firestore_client)
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_tracing.py -v`
 Expected: all 5 tests PASS.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy vor_agents/ main.py`
 Expected: all pass, no regressions. (`mypy --strict` may need `# type: ignore[import-untyped]` on the `import mlflow` line if `mlflow` ships no type stubs — check the actual error before adding one; only add if mypy reports `import-untyped` for that specific line.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/tracing.py tests/test_tracing.py
@@ -382,7 +382,7 @@ git commit -m "Add vor_agents.tracing: best-effort MLflow logging + Firestore fa
 **Interfaces:**
 - Consumes: `log_classification_trace()`, `log_audit_trace()` (Task 2).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_orchestrator.py`:
 
@@ -503,12 +503,12 @@ class TestTracingWiring:
 
 Add to the imports at the top of `tests/test_orchestrator.py` (if not already present from an earlier plan): `from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id` and `from vor_agents.identity import pattern_identity_key`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_orchestrator.py -k Tracing -v`
 Expected: `AttributeError: <module 'vor_agents.orchestrator'> does not have the attribute 'log_classification_trace'` (monkeypatch target doesn't exist yet).
 
-- [ ] **Step 3: Wire tracing into `vor_agents/orchestrator.py`**
+- [x] **Step 3: Wire tracing into `vor_agents/orchestrator.py`**
 
 Add the import (alongside the other `.` imports at the top of the file):
 
@@ -592,17 +592,17 @@ In `audit_pattern()`, add a local `audit_failed = False` right after `mark_under
 
 (If `docs/superpowers/plans/2026-08-24-audit-failure-escalation.md` has already landed, `audit_failed` and the `finally` block's `clear_under_review(..., audit_failed=audit_failed)` call already exist with this exact shape — just add the `log_audit_trace(...)` call after the `finally` block and the escalation-check code that follows it, don't re-add `audit_failed`.)
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_orchestrator.py -v`
 Expected: all tests in the file PASS, including the 4 new ones.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py`
 Expected: all pass, no regressions.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/orchestrator.py tests/test_orchestrator.py
@@ -622,7 +622,7 @@ git commit -m "Log classification/audit traces via vor_agents.tracing"
 **Interfaces:**
 - Produces: `replay_pending_traces(firestore_client: Client) -> int`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_tracing.py`:
 
@@ -679,12 +679,12 @@ class TestReplayPendingTraces:
         assert len(remaining) == 1
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_tracing.py -k Replay -v`
 Expected: `ImportError: cannot import name 'replay_pending_traces'`
 
-- [ ] **Step 3: Add `replay_pending_traces()` to `vor_agents/tracing.py`**
+- [x] **Step 3: Add `replay_pending_traces()` to `vor_agents/tracing.py`**
 
 ```python
 def replay_pending_traces(firestore_client: Client) -> int:
@@ -719,12 +719,12 @@ def replay_pending_traces(firestore_client: Client) -> int:
     return replayed
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_tracing.py -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Add `POST /replay-traces` to `main.py`**
+- [x] **Step 5: Add `POST /replay-traces` to `main.py`**
 
 Write the failing test first, in `tests/test_main.py`:
 
@@ -766,12 +766,12 @@ async def replay_traces(request: Request) -> dict[str, int]:
 
 Run: `.venv/bin/python -m pytest tests/test_main.py -v` — expect all PASS.
 
-- [ ] **Step 6: Run the full suite and lint**
+- [x] **Step 6: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py`
 Expected: all pass, no regressions.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add vor_agents/tracing.py tests/test_tracing.py main.py tests/test_main.py
@@ -788,7 +788,7 @@ git commit -m "Add replay_pending_traces() and POST /replay-traces"
 **Interfaces:**
 - None (documentation only).
 
-- [ ] **Step 1: Add a new section**
+- [x] **Step 1: Add a new section**
 
 Insert after the Cloud Tasks/blast-radius/needs_attention sections (wherever this repo's `DEPLOY.md` currently ends its numbered steps):
 
@@ -834,7 +834,7 @@ collection grows unbounded. Worth a TTL/max-size policy if real outages
 turn out to be long; revisit with real data.
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add docs/DEPLOY.md
@@ -845,7 +845,7 @@ git commit -m "Document MLflow tracking URI and the trace-replay Scheduler job"
 
 ## Final verification
 
-- [ ] Run `.venv/bin/python -m pytest -v` — full suite passes.
-- [ ] Run `.venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py` — all clean.
-- [ ] Confirm `git log --oneline -5` shows one commit per task.
-- [ ] Update `docs/TODO-Aug24.md` Task 4 checkbox to done, referencing the commits.
+- [x] Run `.venv/bin/python -m pytest -v` — full suite passes.
+- [x] Run `.venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py` — all clean.
+- [x] Confirm `git log --oneline -5` shows one commit per task.
+- [x] Update `docs/TODO-Aug24.md` Task 4 checkbox to done, referencing the commits.

@@ -36,9 +36,10 @@ outstanding-decisions discussion.
   real Firestore instance with historical confirmed patterns.
 
 ### Task 4 — MLflow/OTel tracing
-- [ ] CLAUDE.md requires "the option to log activities to mlflow or another otel compatible
-  app." Zero implementation — only mentioned in CLAUDE.md itself and the Cloud Tasks design
-  doc's explicit non-goals (deferred there on purpose). Not started.
+- [x] CLAUDE.md requires "the option to log activities to mlflow or another otel compatible
+  app." **Resolved** — see `docs/superpowers/plans/2026-08-24-mlflow-tracing.md`.
+  `vor_agents/tracing.py` logs both agent calls to MLflow (best-effort, with a Firestore
+  `pending_traces` fallback queue and a `/replay-traces` scheduled drain job).
 - [x] **Decision (2026-08-24): full MLflow tracking integration**, not minimal OTel spans.
   Scope: an MLflow experiment logging each `classify_alert()`/`audit_pattern()` call — prompt,
   model output, resolved decision, and any deterministic-override that fired (the asymmetric
