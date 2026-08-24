@@ -169,3 +169,43 @@ for direct/manual calls.
 configured on `vor-alerts-sub` yet -- a permanently-malformed message
 will retry and 422 until it ages out of the subscription's retention
 window. Revisit once real traffic volume exists to calibrate against.
+
+## 5. MLflow tracing
+
+Set the tracking server URI on the Cloud Run service, alongside the
+existing env vars:
+
+```bash
+gcloud run services update vor \
+  --region us-central1 \
+  --update-env-vars "MLFLOW_TRACKING_URI=https://YOUR_MLFLOW_SERVER"
+```
+
+If the managed server requires its own auth (API key, service-account
+token), that credential goes in Secret Manager / `.env`, never
+hardcoded, per CLAUDE.md's secrets rule -- consult whichever managed
+MLflow offering you're using (Databricks-hosted or self-run) for its own
+auth mechanism; this repo's code just reads `MLFLOW_TRACKING_URI` and
+whatever auth env vars the `mlflow` client itself expects.
+
+Scheduled replay job for the pending_traces fallback queue:
+
+```bash
+gcloud scheduler jobs create http vor-trace-replay \
+  --location us-central1 \
+  --schedule "*/15 * * * *" \
+  --uri "https://YOUR_CLOUD_RUN_URL/replay-traces" \
+  --http-method POST \
+  --oidc-service-account-email "vor-scheduler@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --oidc-token-audience "https://YOUR_CLOUD_RUN_URL"
+```
+
+Every 15 minutes -- unvalidated starting point, same posture as every
+other unvalidated interval/threshold in this project. Reuses the
+existing `vor-scheduler` service account, same as `/sweep`. `/replay-traces`
+must never be deployed with `--allow-unauthenticated`.
+
+**Not addressed here:** no cap on `pending_traces` growth during an
+extended MLflow outage -- if the tracking server is down for days, this
+collection grows unbounded. Worth a TTL/max-size policy if real outages
+turn out to be long; revisit with real data.
