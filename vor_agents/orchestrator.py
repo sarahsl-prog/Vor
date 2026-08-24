@@ -393,7 +393,12 @@ async def audit_pattern(
         # triggered audit, and the failure is visible in the decision's
         # own reasoning text rather than silently swallowed.
         audit_failed = True
-        last_error_repr = repr(exc)
+        # Truncated to a bounded length before it ever reaches Firestore
+        # (via record_needs_attention() below) — an exception repr from a
+        # Firestore/Vertex client can carry request context and grow
+        # large; nothing needs the full text to know a pattern is
+        # failing, and Firestore documents have a 1MiB hard limit.
+        last_error_repr = repr(exc)[:500]
         logger.bind(identity_key=identity_key).exception("Audit failed")
         decision = AuditorOutput(
             action=AuditorAction.NO_ACTION,
