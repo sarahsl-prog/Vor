@@ -204,6 +204,18 @@ def test_sweep_returns_result_if_enqueue_misconfigured(
     assert len(fake_tasks_client.created_tasks) == 0
 
 
+def test_replay_traces_returns_replayed_count(fake_firestore):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.replay_pending_traces", return_value=4),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/replay-traces", json={})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"replayed": 4}
+
+
 def test_audit_endpoint_invokes_audit_pattern(fake_firestore):
     identity_key = ["rule", "w3wp.exe", "csc.exe", "family"]
     fake_decision = AuditorOutput(

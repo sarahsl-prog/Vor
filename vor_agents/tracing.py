@@ -105,6 +105,38 @@ def log_classification_trace(
     _log_run("classification", run_data, firestore_client)
 
 
+def replay_pending_traces(firestore_client: Client) -> int:
+    """
+    Reads every doc in pending_traces, attempts to log each to MLflow;
+    on success deletes the doc, on failure leaves it for the next
+    scheduled run (see main.py's POST /replay-traces). Returns the count
+    successfully replayed. Each doc gets its own try/except -- one bad or
+    still-failing doc doesn't block the rest of the batch.
+    """
+    replayed = 0
+    still_pending = 0
+    for doc in list(firestore_client.collection(PENDING_TRACES_COLLECTION).stream()):
+        data = doc.to_dict() or {}
+        run_type = data.get("run_type", "unknown")
+        run_data = data.get("run_data", {})
+        try:
+            with mlflow.start_run(run_name=f"{run_type}_{run_data.get('identity_key')}_replayed"):
+                mlflow.log_params(
+                    {"run_type": run_type, "identity_key": str(run_data.get("identity_key"))}
+                )
+                mlflow.log_dict(run_data, "run_data.json")
+            firestore_client.collection(PENDING_TRACES_COLLECTION).document(doc.id).delete()
+            replayed += 1
+        except Exception as exc:  # noqa: BLE001 — deliberate: one doc's
+            # failure must not stop the rest of the batch from replaying.
+            still_pending += 1
+            logger.bind(doc_id=doc.id, run_type=run_type).warning(
+                "Replay attempt failed, leaving doc for next run: {}", exc
+            )
+    logger.bind(replayed=replayed, still_pending=still_pending).info("Trace replay run complete")
+    return replayed
+
+
 def log_audit_trace(
     identity_key: tuple[str, ...],
     pattern_data: dict[str, Any],

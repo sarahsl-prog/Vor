@@ -15,6 +15,9 @@ Exposes the trigger paths from the hybrid cadence decision:
   POST /audit    — the only place audit_pattern() actually runs. Reached
                    exclusively via Cloud Tasks (OIDC-authenticated), never
                    called directly by /classify or /sweep.
+  POST /replay-traces — scheduled path, invoked by Cloud Scheduler to
+                   drain vor_agents.tracing's pending_traces fallback
+                   queue back into MLflow.
   GET  /healthz  — Cloud Run health check
 
 See DEPLOY.md for how this actually gets deployed and secured.
@@ -35,6 +38,7 @@ from vor_agents.identity import MalformedAlertError
 from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
 from vor_agents.schemas import AuditRequest, ClassifierRequest, PubSubPushEnvelope
 from vor_agents.task_queue import AuditEnqueueError, enqueue_audit
+from vor_agents.tracing import replay_pending_traces
 
 app = FastAPI(title="Vör")
 _firestore_client = None
@@ -282,3 +286,17 @@ async def audit(payload: AuditRequest) -> dict[str, Any]:
         )
         raise HTTPException(status_code=500, detail="Audit failed, will be retried") from exc
     return decision.model_dump()
+
+
+@app.post("/replay-traces")
+async def replay_traces(request: Request) -> dict[str, int]:
+    """
+    Cloud Scheduler hits this every 15 minutes (see DEPLOY.md) to drain
+    vor_agents.tracing's pending_traces fallback queue -- traces that
+    failed to log directly to MLflow (server unreachable at the time)
+    get retried here. OIDC-gated the same way /sweep is -- Cloud Run
+    itself rejects unauthenticated requests, no manual auth check needed.
+    """
+    client = get_firestore_client()
+    replayed = replay_pending_traces(client)
+    return {"replayed": replayed}

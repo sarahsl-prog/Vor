@@ -17,6 +17,7 @@ from vor_agents.tracing import (
     PENDING_TRACES_COLLECTION,
     log_audit_trace,
     log_classification_trace,
+    replay_pending_traces,
 )
 
 
@@ -129,3 +130,52 @@ class TestLogAuditTrace:
         assert len(docs) == 1
         assert docs[0].to_dict()["run_type"] == "audit"
         assert docs[0].to_dict()["run_data"]["audit_failed"] is True
+
+
+class TestReplayPendingTraces:
+    def _seed_pending(self, fake_firestore, identity_key, run_type="classification"):
+        fake_firestore.collection(PENDING_TRACES_COLLECTION).document(
+            f"pending-{identity_key}"
+        ).set({"run_type": run_type, "run_data": {"identity_key": [identity_key]}})
+
+    def test_replays_and_deletes_successful_docs(self, fake_firestore, monkeypatch):
+        monkeypatch.setattr("vor_agents.tracing.mlflow", _FakeMlflowSuccess())
+        self._seed_pending(fake_firestore, "a")
+        self._seed_pending(fake_firestore, "b")
+
+        count = replay_pending_traces(fake_firestore)
+
+        assert count == 2
+        assert list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream()) == []
+
+    def test_failed_replay_leaves_the_doc_pending(self, fake_firestore, monkeypatch):
+        monkeypatch.setattr("vor_agents.tracing.mlflow", _FakeMlflowAlwaysFails())
+        self._seed_pending(fake_firestore, "a")
+
+        count = replay_pending_traces(fake_firestore)
+
+        assert count == 0
+        assert len(list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream())) == 1
+
+    def test_one_bad_doc_does_not_block_the_rest_of_the_batch(self, fake_firestore, monkeypatch):
+        class _FailsForA:
+            def start_run(self, run_name=None):
+                if run_name and "'a'" in run_name:
+                    raise RuntimeError("still down for this one")
+                return _FakeMlflowRunContext()
+
+            def log_params(self, params):
+                pass
+
+            def log_dict(self, data, path):
+                pass
+
+        monkeypatch.setattr("vor_agents.tracing.mlflow", _FailsForA())
+        self._seed_pending(fake_firestore, "a")
+        self._seed_pending(fake_firestore, "b")
+
+        count = replay_pending_traces(fake_firestore)
+
+        assert count == 1
+        remaining = list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream())
+        assert len(remaining) == 1
