@@ -96,12 +96,18 @@ class PubSubMessage(BaseModel):
 class PubSubPushEnvelope(BaseModel):
     """Body shape Pub/Sub actually POSTs to a push endpoint:
     {"message": {"data": "<base64>", ...}, "subscription": "..."}. Used
-    only to DETECT this shape in /classify -- see main.py's
-    _decode_classify_body(). The alert JSON itself lives base64-encoded
-    inside message.data, decoded and re-validated against
+    both to DETECT this shape in /classify (a successful
+    model_validate() IS the detection -- see main.py's
+    _decode_classify_body()) and to decode it. Requiring `subscription`
+    (a field Pub/Sub push always includes) alongside `message.data` is
+    what keeps a legitimate alert that happens to carry its own top-level
+    `message: {data: ...}` field (e.g. Windows Event Log records commonly
+    do) from being misread as an envelope. The alert JSON itself lives
+    base64-encoded inside message.data, decoded and re-validated against
     ClassifierRequest separately, not by this model."""
 
     message: PubSubMessage
+    subscription: str
 
 
 class AuditorAction(str, Enum):

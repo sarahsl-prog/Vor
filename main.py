@@ -108,33 +108,43 @@ async def healthz() -> dict[str, str]:
 def _decode_classify_body(raw_body: bytes) -> dict[str, Any]:
     """
     Detects whether /classify's raw request body is a Pub/Sub push
-    envelope ({"message": {"data": base64}, ...}) or a raw alert JSON
-    body (direct/test callers). Returns the alert dict either way -- NOT
-    yet validated against ClassifierRequest, the /classify handler does
-    that next with the same model either path took before this change.
+    envelope ({"message": {"data": base64}, "subscription": ...}) or a
+    raw alert JSON body (direct/test callers). Returns the alert dict
+    either way -- NOT yet validated against ClassifierRequest, the
+    /classify handler does that next with the same model either path
+    took before this change.
 
-    Raises ValueError on invalid JSON, a non-object body, or a malformed
-    envelope (invalid base64, or base64 content that isn't a JSON object
-    once decoded) -- /classify's handler turns this into a 422, same as
-    every other malformed-input case in this codebase.
+    Detection IS validation: a body counts as an envelope only if it
+    successfully parses as PubSubPushEnvelope, which requires both
+    message.data AND subscription (a field Pub/Sub push always
+    includes). Requiring subscription is what stops a legitimate alert
+    that happens to carry its own top-level `message: {data: ...}` field
+    (e.g. Windows Event Log records commonly do) from being misread as
+    an envelope -- anything that doesn't validate as an envelope falls
+    straight through to the raw-alert path below.
+
+    Raises ValueError on invalid JSON -- including invalid UTF-8 bytes,
+    since json.loads() raises UnicodeDecodeError (a ValueError subclass)
+    for those rather than JSONDecodeError -- a non-object body, or a
+    malformed envelope (invalid base64, or base64 content that isn't a
+    JSON object once decoded). /classify's handler turns this into a
+    422, same as every other malformed-input case in this codebase.
     """
     try:
         body = json.loads(raw_body)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValueError(f"Request body is not valid JSON: {exc}") from exc
 
-    if (
-        isinstance(body, dict)
-        and isinstance(body.get("message"), dict)
-        and "data" in body["message"]
-    ):
-        PubSubPushEnvelope.model_validate(
-            body
-        )  # raises PydanticValidationError -> caught by caller
+    try:
+        envelope: PubSubPushEnvelope | None = PubSubPushEnvelope.model_validate(body)
+    except PydanticValidationError:
+        envelope = None
+
+    if envelope is not None:
         try:
-            decoded = base64.b64decode(body["message"]["data"], validate=True)
+            decoded = base64.b64decode(envelope.message.data, validate=True)
             alert = json.loads(decoded)
-        except (binascii.Error, json.JSONDecodeError) as exc:
+        except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise ValueError(f"Malformed Pub/Sub push envelope: {exc}") from exc
         if not isinstance(alert, dict):
             raise ValueError("Decoded Pub/Sub message.data is not a JSON object")
@@ -146,6 +156,31 @@ def _decode_classify_body(raw_body: bytes) -> dict[str, Any]:
         # case into a 422, same as the other raises in this function.
         raise ValueError("Request body must be a JSON object")  # noqa: TRY004
     return body
+
+
+def _classify_error_context(raw_body: bytes) -> dict[str, Any]:
+    """Best-effort context for the WARNING logged when /classify rejects
+    a request body. Never raises -- this runs on an already-failing
+    path, so it re-parses raw_body defensively rather than reusing
+    anything from _decode_classify_body()'s own (already-failed) attempt.
+    Reports which shape was detected (envelope-like vs raw vs
+    unparseable/non-object) and, for an envelope-like body, messageId /
+    subscription when present -- both non-sensitive, unlike alert
+    content, which is deliberately not logged here."""
+    try:
+        body = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"shape": "unparseable"}
+    if not isinstance(body, dict):
+        return {"shape": "non-object"}
+    message = body.get("message")
+    if isinstance(message, dict) and "data" in message:
+        return {
+            "shape": "envelope-like",
+            "message_id": message.get("messageId"),
+            "subscription": body.get("subscription"),
+        }
+    return {"shape": "raw-alert"}
 
 
 @app.post("/classify")
@@ -166,6 +201,9 @@ async def classify(request: Request) -> dict[str, Any]:
         alert_body = _decode_classify_body(raw_body)
         payload = ClassifierRequest.model_validate(alert_body)
     except (ValueError, PydanticValidationError) as exc:
+        logger.bind(**_classify_error_context(raw_body)).warning(
+            "Rejected /classify request body: {}", exc
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     alert = payload.model_dump()
