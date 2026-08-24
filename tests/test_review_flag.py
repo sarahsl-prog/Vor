@@ -6,7 +6,12 @@ from vor_agents.enrichment import (
     _doc_id,
     record_confirmed_negative,
 )
-from vor_agents.review_flag import clear_under_review, mark_under_review
+from vor_agents.review_flag import (
+    NEEDS_ATTENTION_COLLECTION,
+    clear_under_review,
+    mark_under_review,
+    record_needs_attention,
+)
 
 
 def _setup_confirmed_pattern(fake_firestore, diverse_confirmed_instances):
@@ -79,3 +84,73 @@ def test_clear_under_review_recommend_upgrade_never_changes_tier(
     assert after["tier"] == before["tier"]
     assert after["confirmed_instances"] == before["confirmed_instances"]
     assert after["under_review"] is False
+
+
+class TestFailureCountTracking:
+    def test_audit_failed_increments_failure_count(self, fake_firestore):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+        mark_under_review(identity_key, fake_firestore)
+
+        new_count = clear_under_review(
+            identity_key, fake_firestore, {"action": "NO_ACTION"}, audit_failed=True
+        )
+
+        assert new_count == 1
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
+        assert doc.to_dict()["failure_count"] == 1
+
+    def test_audit_succeeded_resets_failure_count(self, fake_firestore):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+        mark_under_review(identity_key, fake_firestore)
+        clear_under_review(identity_key, fake_firestore, {"action": "NO_ACTION"}, audit_failed=True)
+        clear_under_review(identity_key, fake_firestore, {"action": "NO_ACTION"}, audit_failed=True)
+
+        new_count = clear_under_review(
+            identity_key, fake_firestore, {"action": "NO_ACTION"}, audit_failed=False
+        )
+
+        assert new_count == 0
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
+        assert doc.to_dict()["failure_count"] == 0
+
+    def test_consecutive_failures_accumulate(self, fake_firestore):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+        mark_under_review(identity_key, fake_firestore)
+
+        counts = [
+            clear_under_review(
+                identity_key, fake_firestore, {"action": "NO_ACTION"}, audit_failed=True
+            )
+            for _ in range(3)
+        ]
+
+        assert counts == [1, 2, 3]
+
+    def test_missing_failure_count_treated_as_zero_before_incrementing(self, fake_firestore):
+        """A doc that predates this feature (or is brand new) has no
+        failure_count field at all -- must not KeyError, starts from 0."""
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+        mark_under_review(identity_key, fake_firestore)
+
+        new_count = clear_under_review(
+            identity_key, fake_firestore, {"action": "NO_ACTION"}, audit_failed=True
+        )
+
+        assert new_count == 1
+
+
+class TestRecordNeedsAttention:
+    def test_writes_a_needs_attention_doc(self, fake_firestore):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        record_needs_attention(identity_key, 3, "RuntimeError('boom')", fake_firestore)
+
+        doc = (
+            fake_firestore.collection(NEEDS_ATTENTION_COLLECTION)
+            .document(_doc_id(identity_key))
+            .get()
+        )
+        assert doc.exists
+        assert doc.to_dict()["failure_count"] == 3
+        assert doc.to_dict()["last_error"] == "RuntimeError('boom')"
+        assert doc.to_dict()["identity_key"] == list(identity_key)
