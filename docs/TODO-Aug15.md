@@ -4,6 +4,8 @@
 
 **Update (2026-08-24):** All 20 tasks now ✅ DONE. Only Task 21 (self-surfaced during Task 13, not in the original report) and the "Outstanding decisions" items below remain open.
 
+**Update (2026-08-24, later):** Task 21 ✅ DONE. `mypy --strict` adopted (see Task 22 below) — the "does the team want to invest in full strict-mode compliance?" question raised in Task 17 is now resolved: yes.
+
 ---
 
 ## 🔴 Critical — fix first
@@ -191,7 +193,18 @@ These block or shape specific tasks above — resolve with the user before or du
 - [x] `vor_agents/orchestrator.py` (`classify_alert`) — added override right after Task 4's `under_review` override: if `enrichment.get("tier") == "provisional"` and `decision == "SUPPRESS"` → force `UNCERTAIN` / `uncertain_reason="graduation_pending"` (enum value already existed, unused until now). Checked after (not merged into) the `under_review` check so a pattern that's both `under_review` AND provisional keeps the more specific `under_review` reason.
 - [x] Added 3 tests mirroring Task 4's, in new `TestProvisionalTierBlocksSuppress`: SUPPRESS overridden when provisional (using the existing `low_diversity_confirmed_instances` fixture — 3 instances meets raw count but fails `MIN_DIVERSITY`, stays provisional); ESCALATE left untouched when provisional; SUPPRESS NOT overridden once graduated (isolates the new check from the pre-existing graduated-pattern coverage).
 - [x] Suite: 102 passed (was 99). ruff/black/mypy/bandit all clean, `pre-commit run --all-files` passes.
-- [x] Commit: `Deterministically block SUPPRESS for provisional-tier patterns`
+- [x] Commit: `f4666fb` — `Deterministically block SUPPRESS for provisional-tier patterns`
+
+### Task 22 (new, not in original report) — Adopt `mypy --strict` ✅ DONE
+- [x] Raised as an open decision in Task 17 (53 errors at the time, not fixed then to keep that commit scoped). User asked for a pros/cons rundown, then said do it now rather than let the debt grow as more code lands.
+- [x] Fixed all 53 `mypy --strict vor_agents/ main.py` findings first, as its own commit, verified strict-clean *before* flipping the config flag — so the flag-flip commit is a pure config change, independently bisectable from the annotation work.
+  - Annotated every previously-untyped function signature across `enrichment.py`, `review_flag.py`, `identity.py`, `schemas.py`, `task_queue.py`, `audit_targets.py`, `blast_radius.py`, `evidence_diversity.py`, `orchestrator.py`, `main.py` (bare `dict`/`tuple` → `dict[str, Any]`/`tuple[str, ...]`, `firestore_client`/`tasks_client`/`agent` params → their real SDK types).
+  - Two real bugs surfaced, not just annotation noise: (1) every `doc.to_dict()` call site relied on a runtime-correct-but-statically-unprovable `if doc.exists else ...` guard — replaced with `doc.to_dict() or {}` (same result, since `to_dict()` is `None` exactly when the doc doesn't exist; simpler *and* satisfies the type checker); (2) `task_queue.enqueue_audit()` was passing a bare `dict` where `CloudTasksClient.create_task()` is typed to take a real `Task` — wrapped it in `Task(...)` explicitly instead of relying on duck-typing, and updated `FakeTasksClient` in `conftest.py` to match (attribute access, `task.name`, not dict subscripting — also makes the fake more faithful to the real client).
+  - Suite: 102 passed (unchanged — no behavior change, only types + the two fixes above, which preserved existing runtime behavior exactly). ruff/black/bandit clean. `mypy --strict`: 0 errors (was 53).
+  - Commit: `cf67136` — `Fix all mypy --strict findings (53 -> 0)`
+- [x] `pyproject.toml`'s `[tool.mypy]` — added `strict = true`, removed the now-redundant explicit `warn_return_any`/`warn_unused_ignores` (both implied by `strict`). No CI/pre-commit command changes needed — `mypy vor_agents/ main.py` picks up `pyproject.toml`'s config automatically, confirmed via a throwaway untyped-function smoke test.
+  - Suite: 102 passed. ruff/black/mypy(strict)/bandit all clean, `pre-commit run --all-files` passes.
+  - Commit: `6ed2724` — `Enable mypy strict mode in pyproject.toml`
 
 ---
 

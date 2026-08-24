@@ -223,6 +223,7 @@ def fake_firestore():
 
 
 from google.api_core.exceptions import AlreadyExists
+from google.cloud.tasks_v2 import Task
 
 
 class FakeTasksClient:
@@ -235,13 +236,18 @@ class FakeTasksClient:
     exercised against the real error type. Deliberately not a full Cloud
     Tasks emulator — tests should never need real GCP credentials or
     network access to run.
+
+    create_task() takes a real Task (attribute access, task.name — not a
+    bare dict) since task_queue.enqueue_audit() now constructs one
+    explicitly rather than passing a plain dict, matching what the real
+    CloudTasksClient.create_task() is typed to receive.
     """
 
     def __init__(self):
-        self.created_tasks: dict[str, dict] = {}
+        self.created_tasks: dict[str, Task] = {}
 
-    def create_task(self, parent: str, task: dict) -> dict:
-        name = task["name"]
+    def create_task(self, parent: str, task: Task) -> Task:
+        name = task.name
         if name in self.created_tasks:
             raise AlreadyExists(f"Task already exists: {name}")
         self.created_tasks[name] = task

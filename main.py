@@ -21,6 +21,7 @@ See DEPLOY.md for how this actually gets deployed and secured.
 """
 
 import os
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from google.cloud import firestore, tasks_v2
@@ -65,7 +66,7 @@ def _audit_url() -> str:
     return f"{os.environ['SERVICE_URL']}/audit"
 
 
-def _enqueue(identity_key: tuple, pattern_data: dict) -> bool:
+def _enqueue(identity_key: tuple[str, ...], pattern_data: dict[str, Any]) -> bool:
     """
     Shared enqueue path for both /classify and /sweep (passed into
     run_scheduled_sweep as its enqueue_audit_fn). Absorbs AuditEnqueueError
@@ -96,12 +97,12 @@ def _enqueue(identity_key: tuple, pattern_data: dict) -> bool:
 
 
 @app.get("/healthz")
-async def healthz():
+async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.post("/classify")
-async def classify(payload: ClassifierRequest):
+async def classify(payload: ClassifierRequest) -> dict[str, Any]:
     """
     payload is validated by FastAPI/pydantic before this body runs, same
     pattern as /audit below — a missing identity field (previously a raw
@@ -119,7 +120,7 @@ async def classify(payload: ClassifierRequest):
 
 
 @app.post("/sweep")
-async def sweep(request: Request):
+async def sweep(request: Request) -> dict[str, int]:
     """
     Cloud Scheduler hits this on a weekly cadence (see DEPLOY.md). The
     scheduler job is configured with an OIDC token bound to a service
@@ -133,7 +134,7 @@ async def sweep(request: Request):
 
 
 @app.post("/audit")
-async def audit(payload: AuditRequest):
+async def audit(payload: AuditRequest) -> dict[str, Any]:
     """
     Reached exclusively via a Cloud Tasks dispatch — never called
     directly by /classify or /sweep. This is the one place

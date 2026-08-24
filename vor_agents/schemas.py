@@ -9,6 +9,7 @@ contract (JSON schema for documentation/reference, Pydantic for runtime).
 """
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -78,7 +79,7 @@ class AuditRequest(BaseModel):
     never succeed."""
 
     identity_key: list[str]
-    pattern_data: dict
+    pattern_data: dict[str, Any]
 
 
 class AuditorAction(str, Enum):

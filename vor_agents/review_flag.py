@@ -8,11 +8,14 @@ a model to notice the ambiguity itself.
 """
 
 from datetime import UTC, datetime
+from typing import Any
+
+from google.cloud.firestore import Client
 
 from .enrichment import CONFIDENCE_COLLECTION, _doc_id, invalidate_instances
 
 
-def mark_under_review(pattern_identity_key: tuple, firestore_client) -> None:
+def mark_under_review(pattern_identity_key: tuple[str, ...], firestore_client: Client) -> None:
     """
     Called by the orchestrator as the FIRST action when an audit is
     triggered for a pattern — before the auditor agent is invoked at all.
@@ -26,7 +29,9 @@ def mark_under_review(pattern_identity_key: tuple, firestore_client) -> None:
 
 
 def clear_under_review(
-    pattern_identity_key: tuple, firestore_client, auditor_decision: dict
+    pattern_identity_key: tuple[str, ...],
+    firestore_client: Client,
+    auditor_decision: dict[str, Any],
 ) -> None:
     """
     Called as part of the SAME write that records the auditor's decision
@@ -54,7 +59,7 @@ def clear_under_review(
         _doc_id(pattern_identity_key)
     )
 
-    update = {
+    update: dict[str, Any] = {
         "under_review": False,
         "last_reviewed_at": datetime.now(UTC).isoformat(),
     }

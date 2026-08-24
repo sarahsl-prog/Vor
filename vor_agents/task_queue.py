@@ -10,9 +10,10 @@ main.py. See docs/superpowers/specs/2026-08-14-cloud-tasks-audit-queue-design.md
 
 import hashlib
 import json
+from typing import Any
 
 from google.api_core.exceptions import AlreadyExists
-from google.cloud.tasks_v2 import HttpMethod
+from google.cloud.tasks_v2 import CloudTasksClient, HttpMethod, Task
 from loguru import logger
 
 
@@ -27,7 +28,7 @@ class AuditEnqueueError(Exception):
     """
 
 
-def _task_name(queue_path: str, identity_key: tuple) -> str:
+def _task_name(queue_path: str, identity_key: tuple[str, ...]) -> str:
     """
     Deterministic task name derived from identity_key: the same pattern
     always maps to the same task name. Cloud Tasks rejects a second task
@@ -54,9 +55,9 @@ def _task_name(queue_path: str, identity_key: tuple) -> str:
 
 
 def enqueue_audit(
-    identity_key: tuple,
-    pattern_data: dict,
-    tasks_client,
+    identity_key: tuple[str, ...],
+    pattern_data: dict[str, Any],
+    tasks_client: CloudTasksClient,
     queue_path: str,
     audit_url: str,
     oidc_service_account_email: str,
@@ -73,21 +74,27 @@ def enqueue_audit(
     classification response).
     """
     task_name = _task_name(queue_path, identity_key)
-    task = {
-        "name": task_name,
-        "http_request": {
-            "http_method": HttpMethod.POST,
-            "url": audit_url,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(
-                {"identity_key": list(identity_key), "pattern_data": pattern_data}
-            ).encode(),
-            "oidc_token": {
-                "service_account_email": oidc_service_account_email,
-                "audience": audit_url,
+    # Task(...) accepts this dict directly (proto-plus message construction)
+    # — wrapped explicitly rather than passed as a bare dict so the type
+    # checker sees the real google.cloud.tasks_v2.Task the client expects,
+    # not just something duck-typed close enough to work at runtime.
+    task = Task(
+        {
+            "name": task_name,
+            "http_request": {
+                "http_method": HttpMethod.POST,
+                "url": audit_url,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps(
+                    {"identity_key": list(identity_key), "pattern_data": pattern_data}
+                ).encode(),
+                "oidc_token": {
+                    "service_account_email": oidc_service_account_email,
+                    "audience": audit_url,
+                },
             },
-        },
-    }
+        }
+    )
 
     try:
         tasks_client.create_task(parent=queue_path, task=task)

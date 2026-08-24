@@ -20,8 +20,7 @@ extend-exclude = '''
 
 [tool.mypy]
 python_version = "3.13"
-warn_return_any = true
-warn_unused_ignores = true
+strict = true
 show_error_codes = true
 exclude = [
     "^.venv/",
