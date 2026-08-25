@@ -25,7 +25,12 @@ from google.genai.types import Content, Part
 from pydantic import ValidationError
 
 from vor_agents.classifier_agent import build_classifier_agent
-from vor_agents.orchestrator import AgentOutputError, _run_agent, classify_alert
+from vor_agents.orchestrator import (
+    AgentOutputError,
+    _run_agent,
+    classify_alert,
+    session_service,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -164,3 +169,36 @@ class TestClassifyAlertDegradesInsteadOfRaising:
 
         # Never SUPPRESS off output the system could not even parse.
         assert result.decision == "UNCERTAIN"
+
+
+class TestSessionCleanup:
+    """REGRESSION: auto_create_session registers a session per call under a
+    uuid4-suffixed ID that is never reused, and Runner holds per-call
+    resources. Without explicit cleanup a long-lived Cloud Run instance
+    accumulates one of each per alert, forever, until it OOMs."""
+
+    async def test_session_is_deleted_after_a_successful_call(self):
+        await _run_with([Part(text=json.dumps(VALID_OUTPUT))], "s-cleanup")
+
+        assert not await _session_for("s-cleanup")
+
+    async def test_session_is_deleted_even_when_the_call_fails(self):
+        """The failure path is the one that matters: a model returning junk
+        must not also leak a session on every retry."""
+        with pytest.raises(AgentOutputError):
+            await _run_with([Part(text="junk")], "s-cleanup-fail")
+
+        assert not await _session_for("s-cleanup-fail")
+
+    async def test_many_calls_do_not_accumulate_sessions(self):
+        for index in range(10):
+            await _run_with([Part(text=json.dumps(VALID_OUTPUT))], f"s-bulk-{index}")
+
+        for index in range(10):
+            assert not await _session_for(f"s-bulk-{index}")
+
+
+async def _session_for(session_id: str) -> object:
+    return await session_service.get_session(
+        app_name="vor", user_id="vor-system", session_id=session_id
+    )

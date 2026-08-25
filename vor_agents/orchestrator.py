@@ -71,6 +71,23 @@ class AgentOutputError(Exception):
     """
 
 
+async def _discard_session(session_id: str) -> None:
+    """
+    Drops the per-call session created by auto_create_session.
+
+    Deliberately best-effort: a session that can't be deleted is a slow
+    resource leak, never a reason to fail a classification or an audit
+    that already produced a usable answer. Logged rather than raised,
+    same posture as _enqueue()'s Cloud Tasks handling in main.py.
+    """
+    try:
+        await session_service.delete_session(
+            app_name="vor", user_id="vor-system", session_id=session_id
+        )
+    except Exception as exc:  # noqa: BLE001 — deliberate, see docstring.
+        logger.bind(session_id=session_id).warning("Could not delete session: {}", repr(exc))
+
+
 async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[str, Any]:
     """Shared runner plumbing — both agents call through this."""
     runner = Runner(
@@ -130,6 +147,16 @@ async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[st
         # when it cannot produce a dict) and lets the existing
         # degrade-to-UNCERTAIN path do its job.
         raise AgentOutputError(f"Model output failed schema validation: {exc}") from exc
+    finally:
+        # Both of these leak without explicit cleanup: Runner holds
+        # plugin/agent resources, and auto_create_session=True registers a
+        # session per call under a uuid4-suffixed ID that is never reused.
+        # On a long-lived Cloud Run instance serving a real alert stream
+        # that grows without bound until the instance is recycled or OOMs.
+        # In a finally block so an exception mid-stream still releases
+        # them.
+        await runner.close()
+        await _discard_session(session_id)
 
     try:
         parsed: dict[str, Any] = json.loads(result_text)
