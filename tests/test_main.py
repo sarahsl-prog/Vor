@@ -4,11 +4,14 @@ Cloud Tasks wiring, since that's the one piece of real logic living in
 this file rather than in vor_agents/.
 """
 
+import base64
+import json as _json
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
 import main
+from vor_agents.blast_radius import ProposalAlreadyResolvedError, ProposalNotFoundError
 from vor_agents.schemas import (
     AuditorAction,
     AuditorOutput,
@@ -202,6 +205,18 @@ def test_sweep_returns_result_if_enqueue_misconfigured(
     assert len(fake_tasks_client.created_tasks) == 0
 
 
+def test_replay_traces_returns_replayed_count(fake_firestore):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.replay_pending_traces", return_value=4),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/replay-traces", json={})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"replayed": 4}
+
+
 def test_audit_endpoint_invokes_audit_pattern(fake_firestore):
     identity_key = ["rule", "w3wp.exe", "csc.exe", "family"]
     fake_decision = AuditorOutput(
@@ -314,9 +329,9 @@ def test_classify_rejects_missing_identity_fields(fake_firestore):
 def test_classify_rejects_invalid_json_body(fake_firestore):
     """Regression coverage: a non-JSON body previously raised an
     unhandled json.decoder.JSONDecodeError out of `await request.json()`,
-    surfacing as a 500. Switching /classify to a Pydantic body param
-    means FastAPI's own request-parsing layer rejects this before main.py
-    code runs at all."""
+    surfacing as a 500. _decode_classify_body()'s own manual json.loads()
+    call now rejects this and turns it into a clean 422 before any
+    envelope/raw-alert detection or ClassifierRequest validation runs."""
     with patch("main.get_firestore_client", return_value=fake_firestore):
         client = TestClient(main.app)
         resp = client.post(
@@ -357,3 +372,181 @@ def test_classify_allows_extra_context_fields(fake_firestore, fake_tasks_client,
     assert resp.status_code == 200
     assert captured_alert["integrity_level"] == "Medium"
     assert captured_alert["host"] == "SRV-01"
+
+
+def _pubsub_envelope(alert: dict) -> dict:
+    encoded = base64.b64encode(_json.dumps(alert).encode()).decode()
+    return {
+        "message": {"data": encoded, "messageId": "1"},
+        "subscription": "projects/p/subscriptions/s",
+    }
+
+
+def test_classify_accepts_pubsub_envelope(fake_firestore, fake_tasks_client, monkeypatch):
+    identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+    alert = {
+        "detection_rule_id": "rule",
+        "parent_image": "w3wp.exe",
+        "child_image": "csc.exe",
+        "endpoint_family": "family",
+    }
+
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
+        patch(
+            "main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/classify", content=_json.dumps(_pubsub_envelope(alert)))
+
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "SUPPRESS"
+
+
+def test_classify_rejects_malformed_pubsub_envelope(fake_firestore):
+    body = {"message": {"data": "not-valid-base64!!!"}, "subscription": "s"}
+
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/classify", content=_json.dumps(body))
+
+    assert resp.status_code == 422
+
+
+def test_classify_rejects_envelope_whose_decoded_data_is_not_json(fake_firestore):
+    encoded = base64.b64encode(b"not json").decode()
+    body = {"message": {"data": encoded}, "subscription": "s"}
+
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/classify", content=_json.dumps(body))
+
+    assert resp.status_code == 422
+
+
+def test_classify_rejects_envelope_whose_decoded_data_is_not_a_json_object(fake_firestore):
+    """message.data decodes to valid JSON that isn't a dict (a list here) --
+    must still 422, not proceed to ClassifierRequest validation."""
+    encoded = base64.b64encode(_json.dumps([1, 2, 3]).encode()).decode()
+    body = {"message": {"data": encoded}, "subscription": "s"}
+
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/classify", content=_json.dumps(body))
+
+    assert resp.status_code == 422
+
+
+def test_classify_rejects_non_object_raw_body(fake_firestore):
+    """A non-envelope raw body that IS valid JSON but isn't a JSON object
+    at all (no `message` wrapper) -- must 422 via the final catch-all in
+    _decode_classify_body(), not raise unhandled out of model_validate."""
+    with patch("main.get_firestore_client", return_value=fake_firestore):
+        client = TestClient(main.app)
+        resp = client.post("/classify", content=_json.dumps([1, 2, 3]))
+
+    assert resp.status_code == 422
+
+
+def test_classify_raw_alert_with_message_field_not_mistaken_for_envelope(
+    fake_firestore, fake_tasks_client, monkeypatch
+):
+    """A legitimate raw alert can carry its own top-level `message` field
+    (Windows Event Log records commonly do) with a nested `data` key that
+    happens to collide with the Pub/Sub envelope shape. Pub/Sub push
+    always includes a top-level `subscription` field -- without it, this
+    must still be classified as a raw alert, not misread as an envelope
+    (which would either 422 a legitimate alert or, worse, silently decode
+    and classify the wrong object)."""
+    identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+    alert = {
+        **_full_alert(),
+        "message": {"data": "some evtx payload", "level": "info"},
+    }
+
+    captured_alert = {}
+
+    async def _fake_classify_alert(alert, client):
+        captured_alert.update(alert)
+        return _suppress_result(), identity_key
+
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
+        patch("main.classify_alert", new=_fake_classify_alert),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/classify", json=alert)
+
+    assert resp.status_code == 200
+    assert captured_alert["message"] == {"data": "some evtx payload", "level": "info"}
+
+
+def test_classify_still_accepts_raw_alert_body(fake_firestore, fake_tasks_client, monkeypatch):
+    """Direct/test callers posting raw alert JSON (no Pub/Sub envelope)
+    keep working exactly as before this change."""
+    identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+    alert = {
+        "detection_rule_id": "rule",
+        "parent_image": "w3wp.exe",
+        "child_image": "csc.exe",
+        "endpoint_family": "family",
+    }
+
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
+        patch(
+            "main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/classify", json=alert)
+
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "SUPPRESS"
+
+
+def test_blast_radius_commit_commits_a_pending_proposal(fake_firestore):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "main.commit_blast_radius_proposal",
+            return_value={"status": "committed", "proposal_id": "p1"},
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/blast-radius/commit", json={"proposal_id": "p1"})
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "committed"
+
+
+def test_blast_radius_commit_returns_404_for_unknown_proposal(fake_firestore):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "main.commit_blast_radius_proposal",
+            side_effect=ProposalNotFoundError("no such proposal"),
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/blast-radius/commit", json={"proposal_id": "missing"})
+
+    assert resp.status_code == 404
+
+
+def test_blast_radius_commit_returns_409_for_already_resolved_proposal(fake_firestore):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "main.commit_blast_radius_proposal",
+            side_effect=ProposalAlreadyResolvedError("already committed"),
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/blast-radius/commit", json={"proposal_id": "p1"})
+
+    assert resp.status_code == 409

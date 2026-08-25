@@ -24,6 +24,7 @@ class UncertainReason(str, Enum):
     NO_HISTORY = "no_history"
     GRADUATION_PENDING = "graduation_pending"
     UNDER_REVIEW = "under_review"
+    AUDIT_FAILING = "audit_failing"
     MISSING_DATA = "missing_data"
     NOT_APPLICABLE = "not_applicable"
 
@@ -80,6 +81,41 @@ class AuditRequest(BaseModel):
 
     identity_key: list[str]
     pattern_data: dict[str, Any]
+
+
+class BlastRadiusCommitRequest(BaseModel):
+    """Body shape for POST /blast-radius/commit -- a human committing a
+    pending MEDIUM/LOW blast-radius proposal into the live table."""
+
+    proposal_id: str
+
+
+class PubSubMessage(BaseModel):
+    """The `message` object inside a Pub/Sub push request body. `data` is
+    base64-encoded -- Pub/Sub always encodes the published message body
+    this way, regardless of what the publisher originally sent. Other
+    fields Pub/Sub includes (messageId, publishTime, attributes) aren't
+    read by anything here, so they're not modeled -- extra="allow" isn't
+    even needed since pydantic ignores unrecognized fields by default."""
+
+    data: str
+
+
+class PubSubPushEnvelope(BaseModel):
+    """Body shape Pub/Sub actually POSTs to a push endpoint:
+    {"message": {"data": "<base64>", ...}, "subscription": "..."}. Used
+    both to DETECT this shape in /classify (a successful
+    model_validate() IS the detection -- see main.py's
+    _decode_classify_body()) and to decode it. Requiring `subscription`
+    (a field Pub/Sub push always includes) alongside `message.data` is
+    what keeps a legitimate alert that happens to carry its own top-level
+    `message: {data: ...}` field (e.g. Windows Event Log records commonly
+    do) from being misread as an envelope. The alert JSON itself lives
+    base64-encoded inside message.data, decoded and re-validated against
+    ClassifierRequest separately, not by this model."""
+
+    message: PubSubMessage
+    subscription: str
 
 
 class AuditorAction(str, Enum):

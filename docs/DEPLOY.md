@@ -114,12 +114,117 @@ account` was passed in step 1), not `vor-scheduler` — that one is only
 for invoking this service and enqueueing Cloud Tasks, unrelated to what
 this service calls outward to Vertex AI.
 
-## 4. The `/classify` endpoint itself
+## 3b. needs_attention collection (no setup required)
 
-`/classify` isn't wired to a trigger source yet — that's genuinely still
-open. Whatever ingests alerts (Hayabusa output, a Sigma rule webhook, a
-Pub/Sub topic something else publishes to) needs to call `POST /classify`
-with the alert JSON. If that source is another GCP service, grant it
-`roles/run.invoker` the same way as step 2; if it's an external webhook,
-front it with a Pub/Sub push subscription authenticated the same way
-rather than exposing `/classify` directly.
+A pattern whose audits fail 3 times consecutively gets a doc written to
+the `needs_attention` Firestore collection (same project, same
+credentials already in use -- Firestore is schemaless, nothing to
+provision). **Nothing currently pushes this to a human** -- no
+dashboard, no alerting integration. Check it manually:
+
+```bash
+gcloud firestore documents list --collection-ids=needs_attention
+```
+
+Revisit once there's an actual notification channel to wire this into.
+
+## 3c. Seed the blast-radius table and gate the commit endpoint
+
+```bash
+.venv/bin/python scripts/seed_blast_radius_table.py
+```
+
+Run once, before first production deploy — populates `blast_radius_table`
+with the 5 entries that used to be hardcoded. Without this,
+`estimate_blast_radius()` falls back to `UNSCORED_DEFAULT` for every
+alert until someone re-proposes and commits each entry by hand.
+
+`/blast-radius/commit` must never be deployed with
+`--allow-unauthenticated`, same as `/classify`/`/sweep`/`/audit` —
+gate it with the same Cloud Run IAM approach (OIDC-authenticated caller).
+Unlike the others, this endpoint is meant to be called by a human, not a
+machine dispatcher — grant `roles/run.invoker` to whichever human
+identities (or a shared review service account) should be allowed to
+commit blast-radius proposals.
+
+## 4. Wire /classify to a Pub/Sub push subscription
+
+```bash
+gcloud pubsub topics create vor-alerts
+
+gcloud pubsub subscriptions create vor-alerts-sub \
+  --topic vor-alerts \
+  --push-endpoint "https://YOUR_CLOUD_RUN_URL/classify" \
+  --push-auth-service-account "vor-scheduler@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --ack-deadline 600
+```
+
+`--ack-deadline 600` (Pub/Sub's max) is required, not cosmetic: `/classify`
+synchronously calls `classify_alert()`, which does a Firestore read plus a
+Gemini call via ADK, and that round-trip routinely exceeds the 10s default
+ack deadline -- without this flag Pub/Sub redelivers a slow-but-successful
+request as if it failed. Cloud Run's own request timeout (step 1) is still
+the outer bound on how long a single attempt can run.
+
+Reuses the `vor-scheduler` service account created in step 2 -- it already
+has `roles/run.invoker` on this service, same reuse pattern as the Cloud
+Tasks `/audit` callback (step 3a).
+
+Whatever the ingest source is (Hayabusa output, a Sigma rule webhook,
+etc. -- not built as part of this repo) needs `roles/pubsub.publisher` on
+the `vor-alerts` topic:
+
+```bash
+gcloud pubsub topics add-iam-policy-binding vor-alerts \
+  --member "serviceAccount:YOUR_INGEST_SOURCE_SERVICE_ACCOUNT" \
+  --role "roles/pubsub.publisher"
+```
+
+`/classify` accepts both a Pub/Sub push envelope and a raw alert JSON
+body -- see `main.py`'s `_decode_classify_body()`. No separate endpoint
+for direct/manual calls.
+
+**Still open:** no dead-letter topic or `--max-delivery-attempts`
+configured on `vor-alerts-sub` yet -- a permanently-malformed message
+will retry and 422 until it ages out of the subscription's retention
+window. Revisit once real traffic volume exists to calibrate against.
+
+## 5. MLflow tracing
+
+Set the tracking server URI on the Cloud Run service, alongside the
+existing env vars:
+
+```bash
+gcloud run services update vor \
+  --region us-central1 \
+  --update-env-vars "MLFLOW_TRACKING_URI=https://YOUR_MLFLOW_SERVER"
+```
+
+If the managed server requires its own auth (API key, service-account
+token), that credential goes in Secret Manager / `.env`, never
+hardcoded, per CLAUDE.md's secrets rule -- consult whichever managed
+MLflow offering you're using (Databricks-hosted or self-run) for its own
+auth mechanism; this repo's code just reads `MLFLOW_TRACKING_URI` and
+whatever auth env vars the `mlflow` client itself expects.
+
+Scheduled replay job for the pending_traces fallback queue:
+
+```bash
+gcloud scheduler jobs create http vor-trace-replay \
+  --location us-central1 \
+  --schedule "*/15 * * * *" \
+  --uri "https://YOUR_CLOUD_RUN_URL/replay-traces" \
+  --http-method POST \
+  --oidc-service-account-email "vor-scheduler@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --oidc-token-audience "https://YOUR_CLOUD_RUN_URL"
+```
+
+Every 15 minutes -- unvalidated starting point, same posture as every
+other unvalidated interval/threshold in this project. Reuses the
+existing `vor-scheduler` service account, same as `/sweep`. `/replay-traces`
+must never be deployed with `--allow-unauthenticated`.
+
+**Not addressed here:** no cap on `pending_traces` growth during an
+extended MLflow outage -- if the tracking server is down for days, this
+collection grows unbounded. Worth a TTL/max-size policy if real outages
+turn out to be long; revisit with real data.

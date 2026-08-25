@@ -21,6 +21,7 @@ from vor_agents.enrichment import (
     _doc_id,
     record_confirmed_negative,
 )
+from vor_agents.identity import pattern_identity_key
 from vor_agents.orchestrator import (
     AgentOutputError,
     _deviation_field_names,
@@ -29,7 +30,7 @@ from vor_agents.orchestrator import (
     classify_alert,
     run_scheduled_sweep,
 )
-from vor_agents.review_flag import mark_under_review
+from vor_agents.review_flag import NEEDS_ATTENTION_COLLECTION, mark_under_review
 
 
 async def _graduate_baseline_pattern(fake_firestore, diverse_confirmed_instances):
@@ -438,9 +439,15 @@ class TestAuditPatternFailureHandling:
     ANY outcome, success or failure.
     """
 
-    async def test_run_agent_exception_clears_under_review_and_stamps_review_time(
+    async def test_run_agent_exception_clears_under_review_but_does_not_stamp_review_time(
         self, fake_firestore, diverse_confirmed_instances
     ):
+        """A failed audit clears under_review (the original stuck-flag
+        fix) but must NOT stamp last_reviewed_at -- a failed audit is not
+        a genuine review, and stamping it would make select_audit_targets()
+        rank this pattern as freshly-reviewed instead of increasingly
+        stale (see final review finding #1 / clear_under_review()'s
+        docstring)."""
         identity_key = ("TestRule", "parent.exe", "child.exe", "testfamily")
         for instance in diverse_confirmed_instances:
             record_confirmed_negative(instance, fake_firestore)
@@ -457,7 +464,7 @@ class TestAuditPatternFailureHandling:
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
         data = doc.to_dict()
         assert data["under_review"] is False
-        assert data["last_reviewed_at"] is not None
+        assert "last_reviewed_at" not in data
 
     async def test_invalid_model_output_clears_under_review(
         self, fake_firestore, diverse_confirmed_instances
@@ -477,6 +484,197 @@ class TestAuditPatternFailureHandling:
 
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
         assert doc.to_dict()["under_review"] is False
+
+
+@pytest.mark.asyncio
+class TestFailureEscalation:
+    """
+    audit_pattern() failing repeatedly for the same pattern must, at the
+    threshold, write a needs_attention doc -- not just clear the flag and
+    log silently forever. Mirrors TestProvisionalTierBlocksSuppress's
+    structure (Task 21 in docs/TODO-Aug15.md).
+    """
+
+    async def _fail_audit_once(self, identity_key, fake_firestore, monkeypatch):
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("model call failed")
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _boom)
+        return await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+    async def test_third_consecutive_failure_writes_needs_attention(
+        self, fake_firestore, monkeypatch
+    ):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        for _ in range(3):
+            await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+
+        doc = (
+            fake_firestore.collection(NEEDS_ATTENTION_COLLECTION)
+            .document(_doc_id(identity_key))
+            .get()
+        )
+        assert doc.exists
+        assert doc.to_dict()["failure_count"] == 3
+
+    async def test_two_consecutive_failures_do_not_escalate(self, fake_firestore, monkeypatch):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        for _ in range(2):
+            await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+
+        doc = (
+            fake_firestore.collection(NEEDS_ATTENTION_COLLECTION)
+            .document(_doc_id(identity_key))
+            .get()
+        )
+        assert not doc.exists
+
+    async def test_success_after_failures_resets_and_prevents_escalation(
+        self, fake_firestore, monkeypatch
+    ):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        for _ in range(2):
+            await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+
+        async def _ok(*args, **kwargs):
+            return {
+                "action": "NO_ACTION",
+                "invalidated_instance_ids": [],
+                "concerns_found": [],
+                "reasoning": "clean",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _ok)
+        await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+        # One more failure after the reset -- count should be 1, not 3.
+        await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+
+        doc = (
+            fake_firestore.collection(NEEDS_ATTENTION_COLLECTION)
+            .document(_doc_id(identity_key))
+            .get()
+        )
+        assert not doc.exists
+
+    async def test_success_after_escalation_resolves_needs_attention_doc(
+        self, fake_firestore, monkeypatch
+    ):
+        """The counterpart to escalation: once a needs_attention doc has
+        been written (3 consecutive failures), a subsequent successful
+        audit must mark it resolved -- see final review finding #2. The
+        doc must persist (a human still needs to be able to see it
+        happened) but carry a resolved_at stamp and a zeroed
+        failure_count so a live escalation can be told apart from a
+        resolved one."""
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        for _ in range(3):
+            await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+
+        doc_ref = fake_firestore.collection(NEEDS_ATTENTION_COLLECTION).document(
+            _doc_id(identity_key)
+        )
+        assert doc_ref.get().exists
+        assert "resolved_at" not in doc_ref.get().to_dict()
+
+        async def _ok(*args, **kwargs):
+            return {
+                "action": "NO_ACTION",
+                "invalidated_instance_ids": [],
+                "concerns_found": [],
+                "reasoning": "clean",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _ok)
+        await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+        resolved = doc_ref.get().to_dict()
+        assert "resolved_at" in resolved
+        assert resolved["failure_count"] == 0
+
+    async def test_needs_attention_write_failure_never_propagates_or_blocks_clear(
+        self, fake_firestore, monkeypatch
+    ):
+        """Directly tests the plan's headline safety constraint (final
+        review finding #4): a failure to write the needs_attention doc on
+        the 3rd consecutive failure must never raise out of
+        audit_pattern(), and must never prevent clear_under_review()'s own
+        write -- the confidence doc must still land with
+        under_review=False / failure_count=3."""
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        def _boom_record(*args, **kwargs):
+            raise RuntimeError("firestore write failed")
+
+        monkeypatch.setattr("vor_agents.orchestrator.record_needs_attention", _boom_record)
+
+        for _ in range(2):
+            await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)
+        await self._fail_audit_once(identity_key, fake_firestore, monkeypatch)  # 3rd -- no raise
+
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
+        data = doc.to_dict()
+        assert data["under_review"] is False
+        assert data["failure_count"] == 3
+
+
+@pytest.mark.asyncio
+class TestFailureCountBlocksSuppress:
+    """Same shape as TestProvisionalTierBlocksSuppress -- SUPPRESS is
+    deterministically overridden once failure_count crosses the
+    escalation threshold, mirroring the under_review/provisional
+    overrides already in classify_alert()."""
+
+    async def test_suppress_overridden_when_failure_count_at_threshold(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances, monkeypatch
+    ):
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        identity_key = pattern_identity_key(baseline_alert)
+        doc_ref = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
+        doc_ref.set({"failure_count": 3}, merge=True)
+
+        async def _fake_run_agent(*args, **kwargs):
+            return {
+                "decision": "SUPPRESS",
+                "matched_pattern_id": "test",
+                "uncertain_reason": "not_applicable",
+                "structural_deviations_found": [],
+                "reasoning": "matches template",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _fake_run_agent)
+        result, _ = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "UNCERTAIN"
+        assert result.uncertain_reason == "audit_failing"
+
+    async def test_failure_count_below_threshold_does_not_override(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances, monkeypatch
+    ):
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        identity_key = pattern_identity_key(baseline_alert)
+        doc_ref = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key))
+        doc_ref.set({"failure_count": 2}, merge=True)
+
+        async def _fake_run_agent(*args, **kwargs):
+            return {
+                "decision": "SUPPRESS",
+                "matched_pattern_id": "test",
+                "uncertain_reason": "not_applicable",
+                "structural_deviations_found": [],
+                "reasoning": "matches template",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _fake_run_agent)
+        result, _ = await classify_alert(baseline_alert, fake_firestore)
+
+        assert result.decision == "SUPPRESS"
 
 
 class _FakePart:
@@ -658,3 +856,124 @@ class TestRunScheduledSweep:
         result = run_scheduled_sweep(fake_firestore, lambda identity_key, pattern_data: True)
 
         assert result == []
+
+
+@pytest.mark.asyncio
+class TestTracingWiring:
+    """
+    classify_alert()/audit_pattern() call the tracing functions exactly
+    once per call, with overrides_fired/audit_failed populated correctly.
+    mlflow itself is monkeypatched to the success fake from
+    test_tracing.py's pattern -- these tests only check that orchestrator
+    calls into tracing.py correctly, not tracing.py's own fallback
+    behavior (already covered in tests/test_tracing.py).
+    """
+
+    async def test_classify_alert_logs_a_trace_with_no_overrides_on_a_clean_suppress(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances, monkeypatch
+    ):
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        async def _fake_run_agent(*args, **kwargs):
+            return {
+                "decision": "SUPPRESS",
+                "matched_pattern_id": "test",
+                "uncertain_reason": "not_applicable",
+                "structural_deviations_found": [],
+                "reasoning": "matches template",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _fake_run_agent)
+        captured = {}
+
+        def _fake_log_classification_trace(
+            alert, enrichment, classifier_output, overrides_fired, client
+        ):
+            captured["overrides_fired"] = overrides_fired
+
+        monkeypatch.setattr(
+            "vor_agents.orchestrator.log_classification_trace", _fake_log_classification_trace
+        )
+
+        await classify_alert(baseline_alert, fake_firestore)
+
+        assert captured["overrides_fired"] == []
+
+    async def test_classify_alert_logs_under_review_override(
+        self, fake_firestore, baseline_alert, diverse_confirmed_instances, monkeypatch
+    ):
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        identity_key = pattern_identity_key(baseline_alert)
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).set(
+            {"under_review": True}, merge=True
+        )
+
+        async def _fake_run_agent(*args, **kwargs):
+            return {
+                "decision": "SUPPRESS",
+                "matched_pattern_id": "test",
+                "uncertain_reason": "not_applicable",
+                "structural_deviations_found": [],
+                "reasoning": "matches template",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _fake_run_agent)
+        captured = {}
+
+        def _fake_log_classification_trace(
+            alert, enrichment, classifier_output, overrides_fired, client
+        ):
+            captured["overrides_fired"] = overrides_fired
+
+        monkeypatch.setattr(
+            "vor_agents.orchestrator.log_classification_trace", _fake_log_classification_trace
+        )
+
+        await classify_alert(baseline_alert, fake_firestore)
+
+        assert captured["overrides_fired"] == ["under_review"]
+
+    async def test_audit_pattern_logs_a_trace(self, fake_firestore, monkeypatch):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        async def _ok(*args, **kwargs):
+            return {
+                "action": "NO_ACTION",
+                "invalidated_instance_ids": [],
+                "concerns_found": [],
+                "reasoning": "clean",
+            }
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _ok)
+        captured = {}
+
+        def _fake_log_audit_trace(ident_key, pattern_data, auditor_output, audit_failed, client):
+            captured["audit_failed"] = audit_failed
+
+        monkeypatch.setattr("vor_agents.orchestrator.log_audit_trace", _fake_log_audit_trace)
+
+        await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+        assert captured["audit_failed"] is False
+
+    async def test_audit_pattern_logs_audit_failed_true_on_failure(
+        self, fake_firestore, monkeypatch
+    ):
+        identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("model call failed")
+
+        monkeypatch.setattr("vor_agents.orchestrator._run_agent", _boom)
+        captured = {}
+
+        def _fake_log_audit_trace(ident_key, pattern_data, auditor_output, audit_failed, client):
+            captured["audit_failed"] = audit_failed
+
+        monkeypatch.setattr("vor_agents.orchestrator.log_audit_trace", _fake_log_audit_trace)
+
+        await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+        assert captured["audit_failed"] is True

@@ -172,6 +172,9 @@ class _FakeDocRef:
             raise KeyError(f"No document to update: {self._doc_id}")
         self._store[self._doc_id].update(data)
 
+    def delete(self) -> None:
+        self._store.pop(self._doc_id, None)
+
 
 class _FakeCollection:
     def __init__(self, store):
@@ -186,6 +189,12 @@ class _FakeCollection:
         assert op == "=="
         matches = {doc_id: data for doc_id, data in self._store.items() if data.get(field) == value}
         return _FakeQuery(matches)
+
+    def stream(self):
+        for doc_id, data in self._store.items():
+            snap = _FakeDocSnapshot(data)
+            snap.id = doc_id
+            yield snap
 
 
 class _FakeQuery:

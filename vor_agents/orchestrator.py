@@ -25,7 +25,12 @@ from .classifier_agent import build_classifier_agent
 from .enrichment import CONFIDENCE_COLLECTION, _doc_id, enrich
 from .evidence_diversity import evidence_diversity_score
 from .identity import diff_alert_against_template
-from .review_flag import clear_under_review, mark_under_review
+from .review_flag import (
+    clear_under_review,
+    mark_under_review,
+    record_needs_attention,
+    resolve_needs_attention,
+)
 from .schemas import (
     AuditorAction,
     AuditorOutput,
@@ -33,10 +38,16 @@ from .schemas import (
     Decision,
     UncertainReason,
 )
+from .tracing import log_audit_trace, log_classification_trace
 
 session_service = InMemorySessionService()  # swap for a persistent
 # SessionService in production;
 # fine for a hackathon demo
+
+AUDIT_FAILURE_ESCALATION_THRESHOLD = 3
+# Unvalidated starting point, same posture as GRADUATION_THRESHOLD /
+# MIN_DIVERSITY elsewhere in this design -- no real audit-failure-rate
+# data exists yet to calibrate against.
 
 
 class AgentOutputError(Exception):
@@ -148,6 +159,7 @@ async def classify_alert(
     string consistently.
     """
     enrichment = enrich(alert, firestore_client)
+    overrides_fired: list[str] = []
 
     precomputed_deviations = []
     if enrichment["status"] == "TEMPLATE":
@@ -181,16 +193,15 @@ async def classify_alert(
         # No reconciliation to run below: there's no classifier_output to
         # reconcile against.
         logger.bind(identity_key=identity_key).error("Classifier output unparseable: {}", exc)
-        return (
-            ClassifierOutput(
-                decision=Decision.UNCERTAIN,
-                matched_pattern_id=None,
-                uncertain_reason=UncertainReason.MISSING_DATA,
-                structural_deviations_found=[],
-                reasoning=f"Classifier returned unparseable output: {exc}",
-            ),
-            identity_key,
+        unparseable_result = ClassifierOutput(
+            decision=Decision.UNCERTAIN,
+            matched_pattern_id=None,
+            uncertain_reason=UncertainReason.MISSING_DATA,
+            structural_deviations_found=[],
+            reasoning=f"Classifier returned unparseable output: {exc}",
         )
+        log_classification_trace(alert, enrichment, unparseable_result, [], firestore_client)
+        return (unparseable_result, identity_key)
 
     if enrichment.get("under_review") and classifier_output.decision == "SUPPRESS":
         # The classifier prompt already tells the model to treat
@@ -214,6 +225,7 @@ async def classify_alert(
                 ),
             }
         )
+        overrides_fired.append("under_review")
 
     if enrichment.get("tier") == "provisional" and classifier_output.decision == "SUPPRESS":
         # Same shape and same reasoning as the under_review override just
@@ -240,6 +252,32 @@ async def classify_alert(
                 ),
             }
         )
+        overrides_fired.append("provisional_tier")
+
+    if (
+        enrichment.get("failure_count", 0) >= AUDIT_FAILURE_ESCALATION_THRESHOLD
+        and classifier_output.decision == "SUPPRESS"
+    ):
+        # Same shape as the under_review/provisional-tier overrides above:
+        # a pattern whose audits keep failing has never actually been
+        # re-verified, no matter how many times the flag got cleared by
+        # audit_pattern()'s try/finally. Force UNCERTAIN rather than let
+        # a stale, never-successfully-audited pattern keep autonomously
+        # suppressing. See docs/superpowers/specs/
+        # 2026-08-24-audit-failure-escalation-design.md.
+        classifier_output = classifier_output.model_copy(
+            update={
+                "decision": "UNCERTAIN",
+                "uncertain_reason": "audit_failing",
+                "reasoning": (
+                    classifier_output.reasoning + " [Vör correctness override: this "
+                    "pattern's audits have failed repeatedly and it has not been "
+                    "successfully re-verified; SUPPRESS not allowed until a human "
+                    "resolves it.]"
+                ),
+            }
+        )
+        overrides_fired.append("audit_failing")
 
     if precomputed_deviations:
         precomputed_fields = _deviation_field_names(precomputed_deviations)
@@ -268,6 +306,7 @@ async def classify_alert(
                     ),
                 }
             )
+            overrides_fired.append("ground_truth_missed")
         # The reverse case (model reported a deviation ground truth didn't
         # find) is deliberately NOT overridden — the model being more
         # cautious than the deterministic check is the safe direction and
@@ -297,7 +336,11 @@ async def classify_alert(
                 ),
             }
         )
+        overrides_fired.append("self_consistency_deviation")
 
+    log_classification_trace(
+        alert, enrichment, classifier_output, overrides_fired, firestore_client
+    )
     return classifier_output, identity_key
 
 
@@ -305,20 +348,21 @@ async def audit_pattern(
     identity_key: tuple[str, ...], pattern_data: dict[str, Any], firestore_client: Client
 ) -> AuditorOutput:
     """
-    Full audit path for one flagged pattern:
-      1. mark_under_review() — synchronous, BEFORE any LLM call, closes
-         the burst-replay race window immediately
-      2. Auditor agent call, separate context from the classifier
-      3. clear_under_review() atomically with the recorded decision,
-         ALWAYS — even if the auditor call itself failed (see except
-         below). Leaving under_review=True on failure would permanently
-         block autonomous suppression for this pattern until someone
-         manually clears the flag in Firestore; a failed audit degrading
-         to "reviewed, no action, try again next sweep" is the same
-         "force a safe outcome in code" principle used everywhere else in
-         this design, not a special case.
+    Full audit path for one flagged pattern -- see the existing docstring
+    for the mark/try/except/finally shape (unchanged). New in this
+    revision: tracks consecutive failures via clear_under_review()'s
+    audit_failed param, and once AUDIT_FAILURE_ESCALATION_THRESHOLD is
+    crossed, writes a needs_attention doc AND classify_alert() forces
+    UNCERTAIN for this pattern going forward (see that function's
+    failure_count override) -- both the in-band and out-of-band halves
+    of the escalation design. On the success path, also resolves any
+    needs_attention doc left over from a prior escalation (see
+    review_flag.resolve_needs_attention) -- the recovery half of the
+    same design.
     """
     mark_under_review(identity_key, firestore_client)
+    audit_failed = False
+    last_error_repr = ""
 
     try:
         # Fetch the full confirmed_instances list directly rather than
@@ -357,14 +401,59 @@ async def audit_pattern(
         # the pattern is still reachable by the next sweep/classify-
         # triggered audit, and the failure is visible in the decision's
         # own reasoning text rather than silently swallowed.
+        audit_failed = True
+        # Truncated to a bounded length before it ever reaches Firestore
+        # (via record_needs_attention() below) — an exception repr from a
+        # Firestore/Vertex client can carry request context and grow
+        # large; nothing needs the full text to know a pattern is
+        # failing, and Firestore documents have a 1MiB hard limit.
+        last_error_repr = repr(exc)[:500]
         logger.bind(identity_key=identity_key).exception("Audit failed")
         decision = AuditorOutput(
             action=AuditorAction.NO_ACTION,
             reasoning=f"Audit failed with error: {exc!r}",
         )
     finally:
-        clear_under_review(identity_key, firestore_client, decision.model_dump())
+        new_failure_count = clear_under_review(
+            identity_key, firestore_client, decision.model_dump(), audit_failed=audit_failed
+        )
 
+    if audit_failed and new_failure_count >= AUDIT_FAILURE_ESCALATION_THRESHOLD:
+        logger.bind(identity_key=identity_key, failure_count=new_failure_count).critical(
+            "Audit failed {} consecutive times; pattern needs human attention",
+            new_failure_count,
+        )
+        try:
+            record_needs_attention(
+                identity_key, new_failure_count, last_error_repr, firestore_client
+            )
+        except Exception as record_exc:  # noqa: BLE001 — deliberate: a
+            # failure to record the escalation must never propagate out
+            # of audit_pattern() and must never prevent the
+            # clear_under_review() write above, which already happened.
+            logger.bind(identity_key=identity_key).error(
+                "Failed to record needs_attention doc: {}", record_exc
+            )
+
+    if not audit_failed:
+        # Counterpart to the escalation write above: a successful audit
+        # for a pattern that previously escalated should mark its
+        # needs_attention doc resolved, so a human looking at that
+        # collection can tell a live escalation from a resolved one (see
+        # review_flag.resolve_needs_attention's docstring). Wrapped in its
+        # own try/except here too, mirroring record_needs_attention()'s
+        # call above, even though resolve_needs_attention() already never
+        # raises on its own — a failure to resolve it must never affect
+        # this function's return value either way.
+        try:
+            resolve_needs_attention(identity_key, firestore_client)
+        except Exception as resolve_exc:  # noqa: BLE001 — deliberate,
+            # see comment above.
+            logger.bind(identity_key=identity_key).error(
+                "Failed to resolve needs_attention doc: {}", resolve_exc
+            )
+
+    log_audit_trace(identity_key, pattern_data, decision, audit_failed, firestore_client)
     return decision
 
 
@@ -493,7 +582,7 @@ def _fetch_all_confirmed_patterns(firestore_client: Client) -> list[dict[str, An
                 # different privilege contexts), and blast radius is
                 # deliberately a worst-case estimate throughout this design.
                 "blast_radius_estimate": max(
-                    estimate_blast_radius(instance) for instance in instances
+                    estimate_blast_radius(instance, firestore_client) for instance in instances
                 ),
             }
         )

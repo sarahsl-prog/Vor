@@ -13,7 +13,15 @@ something HIGH/CRITICAL is the conservative move and can happen freely;
 scoring it MEDIUM/LOW requires a human to actually commit it.
 """
 
+import hashlib
+import json
+import time
+import uuid
+from datetime import UTC, datetime
 from typing import Any
+
+from google.cloud.firestore import Client
+from loguru import logger
 
 CRITICAL = 0.95
 HIGH = 0.75
@@ -33,40 +41,157 @@ TIER_RANGES: dict[str, tuple[float, float]] = {
     "LOW": (0.0, 0.29),
 }
 
-# Keyed by (indicator_type, value) -> score. indicator_type matches a field
-# name that may appear on an alert dict: "parent_image", "endpoint_family",
-# or similar structural indicators — not full identity keys, since the same
-# indicator (e.g. a given parent process) should carry consistent risk
-# across every pattern it appears in, not be re-scored per pattern.
-BLAST_RADIUS_TABLE: dict[tuple[str, str], float] = {
-    ("parent_image", "lsass.exe"): CRITICAL,
-    ("endpoint_family", "ToolPane_admin"): CRITICAL,  # CVE-2026-56164 model
-    ("parent_image", "w3wp.exe"): HIGH,
-    ("parent_image", "svchost.exe"): MEDIUM,
-    ("parent_image", "explorer.exe"): LOW,
-    # New entries: follow BLAST_RADIUS_PLAYBOOK.md. CRITICAL/HIGH may be
-    # added directly. MEDIUM/LOW must go through propose_blast_radius()
-    # and a human review — never write those tiers here without one.
-}
+BLAST_RADIUS_TABLE_COLLECTION = "blast_radius_table"
+BLAST_RADIUS_PROPOSALS_COLLECTION = "blast_radius_proposals"
+
+_TABLE_CACHE: dict[tuple[str, str], float] = {}
+_TABLE_CACHE_LOADED_AT: float | None = None
+_TABLE_CACHE_TTL_SECONDS = 300
+# Per-process, TTL'd cache -- _fetch_all_confirmed_patterns() calls
+# estimate_blast_radius() once per confirmed instance per sweep; a
+# Firestore read per call would turn one sweep into O(instances) reads
+# for a table that changes rarely. 5 minutes is an unvalidated starting
+# point, same posture as GRADUATION_THRESHOLD elsewhere in this design.
 
 
-def estimate_blast_radius(alert: dict[str, Any]) -> float:
+def reset_table_cache() -> None:
+    """Test-only reset hook -- module-level cache state persists across
+    tests in the same process otherwise. Not called anywhere in
+    production code."""
+    global _TABLE_CACHE, _TABLE_CACHE_LOADED_AT
+    _TABLE_CACHE = {}
+    _TABLE_CACHE_LOADED_AT = None
+
+
+def _invalidate_table_cache() -> None:
+    """Called after a commit writes new entries, so the next read sees
+    them without waiting out the full TTL."""
+    global _TABLE_CACHE_LOADED_AT
+    _TABLE_CACHE_LOADED_AT = None
+
+
+def _load_table(firestore_client: Client) -> dict[tuple[str, str], float]:
     """
-    Checks every indicator present on the alert against
-    BLAST_RADIUS_TABLE, returns the MAX matching score — blast radius is
-    a worst-case estimate, not an average, so if an alert matches both a
-    MEDIUM indicator and a CRITICAL one, CRITICAL wins.
-
-    Falls back to UNSCORED_DEFAULT (HIGH, deliberately not LOW or zero)
-    when nothing matches, so an unassessed pattern gets prioritized for
-    audit attention rather than silently trusted by omission.
+    Returns the cached (indicator_type, value) -> score table, refreshing
+    from Firestore if the cache is missing or past its TTL. On a refresh
+    failure: serves the previous cache if one exists (a stale table is a
+    much safer failure mode than an unhandled exception breaking
+    estimate_blast_radius() and, transitively, the whole sweep); falls
+    back to an empty table (every lookup then returns UNSCORED_DEFAULT,
+    same "unassessed defaults to HIGH, never silently trusted" principle
+    this whole module already runs on) if the cache has never been
+    populated at all.
     """
+    global _TABLE_CACHE, _TABLE_CACHE_LOADED_AT
+    now = time.monotonic()
+    if (
+        _TABLE_CACHE_LOADED_AT is not None
+        and (now - _TABLE_CACHE_LOADED_AT) < _TABLE_CACHE_TTL_SECONDS
+    ):
+        return _TABLE_CACHE
+
+    try:
+        fresh: dict[tuple[str, str], float] = {}
+        for doc in firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).stream():
+            data = doc.to_dict() or {}
+            indicator_type = data.get("indicator_type")
+            value = data.get("value")
+            score = data.get("score")
+            if indicator_type is None or value is None or score is None:
+                logger.bind(doc_id=doc.id).warning(
+                    "blast_radius_table doc missing indicator_type/value/score, skipping"
+                )
+                continue
+            fresh[(indicator_type, value)] = score
+        _TABLE_CACHE = fresh
+        _TABLE_CACHE_LOADED_AT = now
+        return _TABLE_CACHE
+    except Exception as exc:  # noqa: BLE001 — deliberate catch-all: any
+        # Firestore failure here degrades to stale-or-empty, never raises.
+        if _TABLE_CACHE_LOADED_AT is not None:
+            logger.bind(error=str(exc)).warning(
+                "Failed to refresh blast_radius_table cache, serving stale cache"
+            )
+            return _TABLE_CACHE
+        logger.bind(error=str(exc)).warning(
+            "Failed to load blast_radius_table cache and no prior cache exists; "
+            "every lookup will fall back to UNSCORED_DEFAULT"
+        )
+        return {}
+
+
+def estimate_blast_radius(alert: dict[str, Any], firestore_client: Client) -> float:
+    """
+    Checks every indicator present on the alert against the cached
+    blast_radius_table (Firestore-backed, see _load_table), returns the
+    MAX matching score -- blast radius is a worst-case estimate, not an
+    average. Falls back to UNSCORED_DEFAULT (HIGH, deliberately not LOW
+    or zero) when nothing matches or the table is unavailable, so an
+    unassessed pattern gets prioritized for audit attention rather than
+    silently trusted by omission.
+    """
+    table = _load_table(firestore_client)
     matches = [
         score
-        for (indicator_type, value), score in BLAST_RADIUS_TABLE.items()
+        for (indicator_type, value), score in table.items()
         if alert.get(indicator_type) == value
     ]
     return max(matches) if matches else UNSCORED_DEFAULT
+
+
+def _table_doc_id(indicator_type: str, value: str) -> str:
+    """Content hash, not a raw f-string join -- same collision-avoidance
+    reasoning as enrichment._doc_id() and task_queue._task_name()."""
+    encoded = json.dumps([indicator_type, value], separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _parse_cited_indicator(indicator: str) -> tuple[str, str]:
+    """
+    cited_indicators entries are "indicator_type=value" strings (e.g.
+    "parent_image=lsass.exe") -- the format propose_blast_radius()'s
+    callers (human or an extended auditor LLM step) are expected to use.
+    Raises ValueError on anything else, same "fail loud on a malformed
+    proposal rather than silently write a wrong table entry" posture as
+    the tier/score validation already in this function.
+    """
+    if "=" not in indicator:
+        raise ValueError(
+            f"Malformed cited_indicator {indicator!r}; expected 'indicator_type=value'"
+        )
+    indicator_type, value = indicator.split("=", 1)
+    return indicator_type.strip(), value.strip()
+
+
+def _commit_indicators(cited_indicators: list[str], score: float, firestore_client: Client) -> None:
+    """Writes each cited indicator into blast_radius_table at the given
+    score, then invalidates the read cache so the next
+    estimate_blast_radius() call sees it without waiting out the TTL."""
+    for indicator in cited_indicators:
+        indicator_type, value = _parse_cited_indicator(indicator)
+        doc_id = _table_doc_id(indicator_type, value)
+        firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).document(doc_id).set(
+            {
+                "indicator_type": indicator_type,
+                "value": value,
+                "score": score,
+                "committed_at": datetime.now(UTC).isoformat(),
+            },
+            merge=True,
+        )
+    _invalidate_table_cache()
+
+
+class ProposalNotFoundError(Exception):
+    """Raised when POST /blast-radius/commit references a proposal_id
+    that doesn't exist in blast_radius_proposals."""
+
+
+class ProposalAlreadyResolvedError(Exception):
+    """Raised when a commit is attempted on a proposal whose status isn't
+    pending_human_review -- no double-commit, whether it was already
+    manually committed or was auto-committed at proposal time (CRITICAL/
+    HIGH)."""
 
 
 def propose_blast_radius(
@@ -75,24 +200,18 @@ def propose_blast_radius(
     proposed_score: float,
     cited_indicators: list[str],
     rationale: str,
+    firestore_client: Client,
 ) -> dict[str, Any]:
     """
-    NOT auto-applied to BLAST_RADIUS_TABLE under any circumstances. Callable
-    by a human directly, or by an LLM step (e.g. an extended auditor pass)
-    proposing a new pattern be scored — either way this returns an inert
-    record. Promoting it into BLAST_RADIUS_TABLE is a manual code change
-    made after review against BLAST_RADIUS_PLAYBOOK.md, particularly for
-    any MEDIUM/LOW proposal, which is the direction that reduces scrutiny.
-
-    Raises ValueError for an unknown proposed_tier or a proposed_score
-    outside that tier's documented range (TIER_RANGES, from
-    BLAST_RADIUS_PLAYBOOK.md's Tiers section) — previously an unknown
-    tier silently fell through requires_review's `in ("MEDIUM", "LOW")`
-    check as False, and a tier/score mismatch (e.g. LOW with a CRITICAL-
-    range score) was accepted without complaint. Both are weak-API-
-    contract bugs a human reviewer downstream could be misled by, not
-    just cosmetic — the whole point of TIER_RANGES existing is that a
-    tier and its score are supposed to agree.
+    Validates tier/score exactly as before (raises ValueError for an
+    unknown tier or an out-of-range score -- unchanged). New in this
+    revision: persists the proposal to blast_radius_proposals instead of
+    just returning an inert dict, and CRITICAL/HIGH proposals commit
+    directly into blast_radius_table in the same call (the conservative
+    direction -- matches BLAST_RADIUS_PLAYBOOK.md's "may be added
+    directly" language). MEDIUM/LOW proposals are written with
+    status="pending_human_review" and NOT committed -- see
+    commit_blast_radius_proposal() for the human-gated commit path.
     """
     if proposed_tier not in TIER_RANGES:
         raise ValueError(
@@ -105,12 +224,52 @@ def propose_blast_radius(
             f"documented range [{low}, {high}] (see BLAST_RADIUS_PLAYBOOK.md)"
         )
 
-    return {
-        "identity_key": identity_key,
+    requires_review = proposed_tier in ("MEDIUM", "LOW")
+    proposal: dict[str, Any] = {
+        "proposal_id": str(uuid.uuid4()),
+        "identity_key": list(identity_key),
         "proposed_tier": proposed_tier,
         "proposed_score": proposed_score,
         "cited_indicators": cited_indicators,
         "rationale": rationale,
+        "proposed_at": datetime.now(UTC).isoformat(),
         "status": "pending_human_review",
-        "requires_review": proposed_tier in ("MEDIUM", "LOW"),
+        "requires_review": requires_review,
     }
+
+    if not requires_review:
+        _commit_indicators(cited_indicators, proposed_score, firestore_client)
+        proposal["status"] = "committed"
+
+    firestore_client.collection(BLAST_RADIUS_PROPOSALS_COLLECTION).document(
+        proposal["proposal_id"]
+    ).set(proposal)
+    return proposal
+
+
+def commit_blast_radius_proposal(proposal_id: str, firestore_client: Client) -> dict[str, Any]:
+    """
+    Human-triggered commit for a pending MEDIUM/LOW proposal -- see
+    main.py's POST /blast-radius/commit, the only caller. Writes the
+    proposal's cited indicators into blast_radius_table at its
+    proposed_score, marks the proposal committed, returns the updated
+    proposal dict.
+    """
+    doc_ref = firestore_client.collection(BLAST_RADIUS_PROPOSALS_COLLECTION).document(proposal_id)
+    doc = doc_ref.get()
+    if not doc.exists:
+        raise ProposalNotFoundError(f"No blast-radius proposal with id {proposal_id!r}")
+
+    data = doc.to_dict() or {}
+    if data.get("status") != "pending_human_review":
+        raise ProposalAlreadyResolvedError(
+            f"Proposal {proposal_id!r} already has status {data.get('status')!r}, "
+            "not pending_human_review"
+        )
+
+    _commit_indicators(data["cited_indicators"], data["proposed_score"], firestore_client)
+    committed_at = datetime.now(UTC).isoformat()
+    doc_ref.update({"status": "committed", "committed_at": committed_at})
+    data["status"] = "committed"
+    data["committed_at"] = committed_at
+    return data

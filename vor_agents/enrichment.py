@@ -53,6 +53,7 @@ def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
             "under_review": bool,
             "days_since_last_review": int,
             "diversity_score": float,
+            "failure_count": int,
         }
 
     This dict is what gets serialized into the classifier's prompt context
@@ -83,6 +84,7 @@ def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
         "under_review": data.get("under_review", False),
         "days_since_last_review": data.get("days_since_last_review", 0),
         "diversity_score": data.get("diversity_score", 0.0),
+        "failure_count": data.get("failure_count", 0),
     }
 
 

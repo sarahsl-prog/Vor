@@ -52,9 +52,24 @@ A proposal must cite:
 3. **What would change the score** — what evidence would move this entry
    up or down a tier, so the entry stays revisable rather than frozen.
 
-Proposals scoring something CRITICAL or HIGH may be added directly — that's
-the conservative direction. **Any proposal at MEDIUM or LOW requires a
-human to review and commit it** — see `propose_blast_radius()` in
-`blast_radius.py`, which returns a pending record rather than writing to
-the table. No proposal — human or LLM-authored — goes straight into
-`BLAST_RADIUS_TABLE` at MEDIUM/LOW without that review step.
+Proposals scoring something CRITICAL or HIGH commit directly into the
+table — that's the conservative direction, and `propose_blast_radius()`
+does this automatically, no separate step. **Any proposal at MEDIUM or
+LOW requires a human to review and commit it** — `propose_blast_radius()`
+writes it as a pending record instead (`status="pending_human_review"`);
+`commit_blast_radius_proposal()`, reached via `POST /blast-radius/commit`,
+is the only way it becomes live. No proposal — human or LLM-authored —
+goes straight into the table at MEDIUM/LOW without that explicit human
+commit step. See `blast_radius.py` for both functions.
+
+## Storage note
+
+`BLAST_RADIUS_TABLE` is Firestore-backed (`blast_radius_table`
+collection), not a Python literal — updating an entry no longer requires
+a code deploy. The trust model this playbook describes is unchanged: a
+CRITICAL/HIGH proposal still commits automatically (the conservative
+direction), a MEDIUM/LOW proposal still requires an explicit human
+action (`POST /blast-radius/commit`, IAM-gated to authorized reviewers)
+before it takes effect. Access control now lives in Cloud Run IAM on
+that endpoint, not in "who can open a pull request" — keep the reviewer
+list for that IAM binding at least as tight as code-review access was.
