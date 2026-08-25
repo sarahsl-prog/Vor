@@ -115,17 +115,21 @@ outstanding-decisions discussion.
   Currently scattered across DEPLOY.md's gcloud commands only.
 
 ### Task 11 — Trigger-source design doc (pairs with Task 1)
-- [ ] No spec for how `/classify` actually gets called — DEPLOY.md only gestures at "front it
-  with a Pub/Sub push subscription." Cloud Tasks work got a full design doc + plan; this gap
-  hasn't.
+- [x] **Resolved** — see `docs/superpowers/specs/2026-08-24-pubsub-classify-trigger-design.md`
+  (spec) and `docs/superpowers/plans/2026-08-24-pubsub-classify-trigger.md` (implementation
+  plan). DEPLOY.md step 4 now documents the `vor-alerts` topic, the `vor-alerts-sub` push
+  subscription (OIDC-authenticated, `--ack-deadline 600`), and the publisher IAM binding the
+  ingest source needs.
 
 ### Task 12 — Dataset/seeding runbook (pairs with Tasks 2–3)
 - [ ] No doc enumerates what all 6 synthetic cases actually are — only cases #3 and #6 are named
   anywhere (TESTING_PLAN.md).
 
 ### Task 13 — MLflow/OTel integration doc (pairs with Task 4)
-- [ ] Nothing to write until the feature exists, but flagging since CLAUDE.md treats it as a
-  standing requirement, not optional — should land alongside Task 4, not as an afterthought.
+- [x] **Resolved** — landed alongside Task 4, not as an afterthought. See
+  `docs/superpowers/specs/2026-08-24-mlflow-tracing-design.md` and DEPLOY.md step 5
+  (`MLFLOW_TRACKING_URI`, the `vor-trace-replay` Scheduler job draining `pending_traces`, and
+  the still-open unbounded-growth caveat during an extended MLflow outage).
 
 ### Task 14 — Fix stale "Known gaps" section header in README
 - [ ] Cosmetic: section is titled "not yet resolved" but its one item (identity-key round-trip)
@@ -153,8 +157,11 @@ outstanding-decisions discussion.
   coverage map, not just a "features" gap.
 
 ### Task 19 — Consecutive-failure-escalation tests
-- [ ] Blocked on Task 6 existing first. Flagging now since it's a named safety gap with zero
-  coverage of the current "clears and logs, forever, silently" behavior either.
+- [x] **Resolved** — unblocked by Task 6 landing. `tests/test_review_flag.py`
+  (`TestFailureCountTracking`, `TestRecordNeedsAttention`) covers increment/reset/accumulate and
+  the `needs_attention` write; `tests/test_orchestrator.py` (`TestFailureEscalation`,
+  `TestFailureCountBlocksSuppress`) covers escalation at the threshold, no escalation below it,
+  reset-on-success, and the deterministic SUPPRESS → UNCERTAIN override.
 
 ---
 
