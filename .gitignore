@@ -30,3 +30,8 @@ Thumbs.db
 *.log
 .entire/
 .superpowers/
+
+# MLflow local scratch — the default file-store tracking backend writes these
+# when tests run without MLFLOW_TRACKING_URI pointing at a real server.
+mlruns/
+mlflow.db
