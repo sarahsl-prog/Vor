@@ -1,228 +1,209 @@
 # Vör — "Trust, audited."
 
 Vör is a self-tuning confidence layer for Windows Event Log / Hayabusa-style
-alert triage that decides when it's safe to autonomously suppress a known-benign
-alert and when to escalate to a human — without letting that trust go stale or
-unnoticed. A classifier agent makes the call; a separate auditor agent
-periodically re-checks past suppressions against the actual evidence behind
-them, with the authority to downgrade trust on its own but never to grant it
+alert triage. It decides when it is safe to autonomously suppress a
+known-benign alert and when to escalate to a human — without letting that
+trust go stale or unnoticed.
+
+A **classifier** agent makes the call. A separate **auditor** agent
+periodically re-checks past suppressions against the evidence behind them,
+with the authority to downgrade trust on its own but never to grant it
 without a human signing off.
 
-All Things Agentic Hackathon, **The Taskmaster** track (switched from
-Collaborative Partner — see rationale below).
+---
 
-First real build step — everything before this was design (see full
-history in Obsidian `Projects/Adaptive-Alert-Agent/`).
+## How it works
 
-## Track — The Taskmaster
-Switched from Collaborative Partner after the design pivoted from
-personalization (Mimir-era) toward audit/trust. Judging rubric is the same
-across all tracks (40% Innovation & Operational Utility, 30% Architectural
-Discipline & Tech Stack, 30% Demo & Production Readiness), so track choice
-affects framing and prize pool, not scoring mechanics.
+An alert arrives at `POST /classify`. Before any model is involved, Vör
+builds a **pattern identity key** — `(detection_rule_id, parent_image,
+child_image, endpoint_family)` — and looks up what it already knows about
+that pattern in Firestore. The classifier is then asked to compare the alert
+against that history and return `SUPPRESS`, `ESCALATE`, or `UNCERTAIN`.
 
-- **Collaborative Partner ruled out**: actual track wording is "ask
-  clarifying questions, guide the user step-by-step... adapts to the
-  user's unique way of thinking" — a live human-facing coaching loop. Vör
-  has no user turn-taking left at all.
-- **Fortified Enterprise Fleet considered and ruled out despite strong
-  thematic fit** ("audit their reasoning, trust their data handling, scale
-  them safely" almost literally describes what the auditor agent does):
-  the real submission bar is heavier than it first looked — Agent
-  Registry, Agent Identity, Agent Gateway, Model Armor, Agent
-  Observability, cross-department cataloging, weeks-long async state.
-  Vör today is one Firestore collection and two agents; getting to a
-  genuine (not just thematic) fit was too much added scope this close to
-  the deadline.
-- **Taskmaster fits without added scope**: "Make one that takes action...
-  handles the details... proves it can do the heavy lifting for you."
-  Maps directly onto the classifier autonomously deciding
-  SUPPRESS/ESCALATE/UNCERTAIN with no human in the loop for the common
-  case — hits the 40%-weighted "autonomous, high-value action... little
-  to no hand-holding" criterion using the architecture already built.
+Three things constrain what the model is allowed to conclude:
 
-Also worth targeting regardless of main track: **Best Architectural
-Design** ($5,000, 2 winners) is a track-agnostic bonus category, and
-architectural rigor is the strongest asset here.
+- **A pattern must graduate before it can be suppressed autonomously.**
+  Graduation is a two-part gate: enough confirmed instances *and* enough
+  diversity across host/user/hour. Repetition on one machine is one
+  observation, not many.
+- **The model's diffing is checked, not trusted.** Deviations are computed
+  deterministically in Python and reconciled against what the model
+  reported. If ground truth found a deviation the model missed and it still
+  said `SUPPRESS`, the decision is overridden to `ESCALATE` in code — and
+  the override is recorded in the returned reasoning, never silent. The
+  reverse (model more cautious than ground truth) stands as-is.
+- **Unassessed means risky, not safe.** A pattern with no blast-radius score
+  defaults to HIGH.
+
+A `SUPPRESS` decision enqueues an audit onto Cloud Tasks. `POST /sweep`, run
+on a schedule, is the safety net for quiet patterns that event-triggering
+would rarely revisit. Audits run in their own request at `POST /audit`.
+
+When an audit fails repeatedly for the same pattern, that pattern is forced
+to `UNCERTAIN` and a record is written to the `needs_attention` collection —
+a pattern that has never actually been re-verified doesn't get to keep
+suppressing.
+
+The full reasoning behind these choices is archived in
+[`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md).
+
+---
 
 ## Structure
 
 | File | What it is | Calls an LLM? |
 |---|---|---|
 | `vor_agents/schemas.py` | Pydantic output schemas for both agents | No |
-| `vor_agents/identity.py` | Pattern identity key, structural template, diff logic | No |
+| `vor_agents/identity.py` | Pattern identity key, structural template, diff logic, graduation gate | No |
 | `vor_agents/enrichment.py` | Firestore reads/writes feeding the classifier | No |
-| `vor_agents/review_flag.py` | `under_review` race-condition fix | No |
-| `vor_agents/evidence_diversity.py` | Pure computation of evidence diversity from confirmed instances | No |
-| `vor_agents/blast_radius.py` | Hybrid curated table + gated proposal path for risk scoring | No |
+| `vor_agents/review_flag.py` | `under_review` lifecycle, consecutive-failure tracking | No |
+| `vor_agents/evidence_diversity.py` | Evidence diversity scoring over confirmed instances | No |
+| `vor_agents/blast_radius.py` | Firestore-backed risk table + gated proposal path | No |
 | `vor_agents/audit_targets.py` | Deterministic auditor target prioritization | No |
+| `vor_agents/task_queue.py` | Cloud Tasks audit-enqueue path with server-side dedup | No |
+| `vor_agents/tracing.py` | MLflow tracing, with a Firestore fallback queue | No |
+| `vor_agents/datasets.py` | Synthetic dataset generation for the 6 canonical cases | No |
+| `vor_agents/model_config.py` | Gemini model selection (`GEMINI_MODEL`) | No |
+| `vor_agents/firestore_config.py` | Firestore database selection (`FIRESTORE_DATABASE`) | No |
+| `vor_agents/env_config.py` | Integer settings read from the environment | No |
 | `vor_agents/classifier_agent.py` | ADK `Agent` definition, classifier prompt | Yes (Gemini) |
 | `vor_agents/auditor_agent.py` | ADK `Agent` definition, auditor prompt, separate context | Yes (Gemini) |
-| `vor_agents/orchestrator.py` | Wires everything together, only place that calls `Runner` | Orchestrates both |
+| `vor_agents/orchestrator.py` | Wires everything together; the only file that calls `Runner` | Orchestrates both |
+| `main.py` | Cloud Run entrypoint (FastAPI) | No |
 
-## Design principle carried through the scaffold
-Neither agent has ADK `tools=` attached. Enrichment, template-building, and
-all Firestore writes happen in plain Python **before or after** the agent
-call, never inside it. This was a deliberate choice, not a limitation
-worked around — see `classifier_agent.py` and `auditor_agent.py` docstrings.
-It also means this scaffold doesn't depend on ADK's `output_schema` +
-`tools` compatibility (which has changed across versions) at all.
+**Neither agent has ADK `tools=` attached.** Enrichment, template-building,
+and every Firestore write happen in plain Python before or after the agent
+call, never inside it. That boundary is what makes the deterministic
+override possible, and it is deliberate — see the agent module docstrings.
 
-## Confidence representation — resolved: targeted evidence invalidation
-Every confirmed instance gets a stable `instance_id` (assigned in
-`record_confirmed_negative()` / `seed_template()`). On DOWNGRADE, the
-auditor cites specific `invalidated_instance_ids` — only those instances
-are removed from the pool, and `invalidate_instances()` in `enrichment.py`
-rebuilds the template from what remains. Tier is a *consequence* of the
-rebuild, not something the caller force-sets: a pattern with 9 good
-instances and 1 bad one loses only the bad one and can stay "confirmed"
-with a corrected template; a pattern where most evidence gets invalidated
-naturally falls back to "provisional." No separate confidence float —
-this replaces that idea rather than living alongside it.
+### Endpoints
 
-The auditor prompt (`auditor_agent.py`) now requires citing real
-`instance_id` values from the `confirmed_instances` list it's shown, never
-inventing one, and allows citing *every* ID as an explicit full
-invalidation when the concern is genuinely pattern-wide.
+| Endpoint | Trigger | Purpose |
+|---|---|---|
+| `POST /classify` | Pub/Sub push, or a direct call | Classify one alert |
+| `POST /sweep` | Cloud Scheduler | Enqueue audits for stale patterns |
+| `POST /audit` | Cloud Tasks | Run one audit |
+| `POST /blast-radius/commit` | Human | Commit a pending MEDIUM/LOW proposal |
+| `POST /replay-traces` | Cloud Scheduler | Drain the `pending_traces` fallback queue |
+| `GET /healthz` | Cloud Run | Health check |
 
-## Audit prioritization scoring — resolved
-Both inputs `select_audit_targets()` needed are now real:
+Only `/blast-radius/commit` is meant to be called by a person. None of these
+should ever be deployed with `--allow-unauthenticated`.
 
-- **`evidence_diversity_score`** (`evidence_diversity.py`): pure
-  computation over `confirmed_instances` — distinct-value ratio across
-  host/user/hour-of-day, averaged. Catches the failure mode the auditor
-  prompt already warns about: 20 confirmations from the same host/user/
-  hour is weak evidence dressed up as strong.
-- **`blast_radius_estimate`** (`blast_radius.py`): hybrid design per
-  `BLAST_RADIUS_PLAYBOOK.md`. A curated table (`BLAST_RADIUS_TABLE`) maps
-  structural indicators (parent process, endpoint family) to a risk tier;
-  unmatched patterns default to HIGH, never LOW, so an unassessed pattern
-  isn't silently trusted. New entries can be proposed via
-  `propose_blast_radius()`, but that never writes the table directly —
-  CRITICAL/HIGH proposals may be added straight to the table (the safe
-  direction), MEDIUM/LOW proposals are gated behind human review (the
-  direction that reduces scrutiny, same asymmetry as the auditor's
-  DOWNGRADE/RECOMMEND_UPGRADE split).
+### Firestore collections
 
-`_fetch_all_confirmed_patterns()` in `orchestrator.py` is now
-implemented using both, plus a `last_reviewed_at` timestamp (newly stamped
-by `clear_under_review()` on every audit outcome, not just downgrades) to
-compute `days_since_last_review`. Never-audited patterns get a large
-sentinel value rather than 0, so they don't look artificially low-priority.
+`confidence_docs` (pattern history and templates) · `blast_radius_table` ·
+`blast_radius_proposals` · `needs_attention` · `pending_traces`
 
-## Graduation threshold — resolved: two-part gate
-`GRADUATION_THRESHOLD = 3` alone was statistically weak: if a diffable
-field is genuinely variable rather than truly invariant (say a real 80/20
-split), the odds of 3 random confirmations all landing on the same value
-are roughly 51% — close to a coin flip that a "confirmed" template locks
-in a field as trusted when it isn't. Real review-volume data to calibrate
-against doesn't exist yet (same open gap as elsewhere in this design), so
-rather than guess at a "correct" count, graduation now requires **both**
-`instance_count >= GRADUATION_THRESHOLD` **and**
-`evidence_diversity_score >= MIN_DIVERSITY` (`identity.py`). Count alone
-can pass on repetition (same host/user/hour logged three times); diversity
-alone with too few instances is just noise. `MIN_DIVERSITY = 0.5` is a
-starting point, explicitly flagged as unvalidated, same as the count.
+---
 
-Also fixed in the same pass: `enrich()` in `enrichment.py` was reading a
-field name (`evidence_diversity_score`) that never matched what any write
-path actually stored (`diversity_score`) — it was silently always
-returning the `0.0` default. Naming is now consistent across
-`build_structural_template()`'s return value, every Firestore write path,
-and `enrich()`'s read.
+## Getting started
 
-## Cloud Run / Cloud Scheduler wiring — resolved
-`main.py`, `Dockerfile`, and `DEPLOY.md` added. `POST /classify` is the
-event-triggered primary path — a SUPPRESS decision means the pattern's
-identity key just matched an incoming alert again, exactly the trigger
-condition the hybrid cadence was designed around, so it fires an audit as
-a background task. `POST /sweep` is the scheduled safety net, meant to be
-hit weekly by Cloud Scheduler with an OIDC-authenticated request (see
-DEPLOY.md steps 2–3) — neither endpoint should ever be deployed with
-`--allow-unauthenticated`.
+```bash
+python3.13 -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+cp .env.example .env    # then fill it in
+```
 
-`classify_alert()` now returns `(result, identity_key)` instead of just
-the `ClassifierOutput` — the identity key comes from `enrich()`'s
-deterministic computation, not from parsing the model's own
-`matched_pattern_id` text, which would have repeated the same fragile-
-split problem as gap #1 below, one layer less reliable since it'd also
-depend on the model formatting that string consistently.
+Run the test suite and the quality gates:
 
-Also added: a guard in `/classify` that checks `under_review` before
-firing a background audit, so a burst of the same SUPPRESS-eligible
-pattern arriving faster than one audit completes doesn't schedule
-duplicate concurrent auditor calls for the same identity key.
+```bash
+.venv/bin/python -m pytest                       # 288 tests, no network or credentials needed
+.venv/bin/python -m ruff check .
+.venv/bin/python -m black --check .
+.venv/bin/python -m mypy vor_agents/ main.py scripts/
+.venv/bin/python -m bandit -r vor_agents/ main.py scripts/
+```
 
-**Real caveat, not fully resolved**: firing an audit on every single
-SUPPRESS decision could get expensive at real alert volume — this wasn't
-throttled or sampled, just gated against duplicates. Worth revisiting
-with actual traffic data (same "no real volume to calibrate against" gap
-as `GRADUATION_THRESHOLD`/`MIN_DIVERSITY`) — a rate limit or sampling
-strategy per identity key is the likely fix once that data exists.
+Integration tests that call the real Gemini API are excluded from the
+default run because they cost money and aren't deterministic. Run them
+deliberately:
 
-**Also not resolved**: `/classify` has no actual trigger source wired up
-yet — nothing currently calls it. See DEPLOY.md step 4.
+```bash
+.venv/bin/python -m pytest -m integration
+```
 
-## Model backend — resolved: Vertex AI, not the Gemini API key
-Both agents just pass a plain model string (`model="gemini-2.0-flash"`)
-to ADK's `Agent` — no explicit client construction in
-`classifier_agent.py`/`auditor_agent.py`. Backend selection is entirely
-environment-variable-driven, read by `google-genai` (an ADK dependency):
-`GOOGLE_GENAI_USE_VERTEXAI=true` + `GOOGLE_CLOUD_PROJECT` +
-`GOOGLE_CLOUD_LOCATION` route through Vertex AI using the caller's
-Application Default Credentials; their absence (with `GOOGLE_API_KEY`
-set instead) falls back to the Gemini Developer API. `.env` and
-`DEPLOY.md` are both configured for Vertex AI — matches "meant to be run
-in Google Cloud" from `CLAUDE.md`, and means the Cloud Run service
-authenticates to the model as itself (its own service account, granted
-`roles/aiplatform.user` — see DEPLOY.md step 3a) rather than carrying a
-separate API key as a secret to manage and rotate.
+Without Vertex AI credentials configured they report skipped rather than
+failing.
 
-## Precomputed deviations — resolved: asymmetric reconciliation
-`precomputed_deviations` is no longer computed-and-discarded. After the
-classifier agent returns, its reported deviations are compared against
-the deterministic diff by field name (not exact string match — the model
-isn't guaranteed to phrase `template=X, observed=Y` identically to the
-Python-generated version, so comparison is on which fields disagreed, not
-the literal text).
+---
 
-Same asymmetry as everywhere else in this design:
-- **Ground truth found a deviation the model didn't report, and the model
-  still said SUPPRESS** — the dangerous direction. Overridden to ESCALATE
-  automatically, in code, not by asking the model to reconsider. The
-  override is recorded in the returned `reasoning` text so it's visible,
-  never silent.
-- **The model reported a deviation ground truth didn't find** — the model
-  being more cautious than the deterministic check. Safe direction, no
-  override, decision stands as-is.
+## Configuration
 
-This closes the loop the original design flagged: the model's diffing was
-"authoritative" only in the sense that nothing was checking it. Now a
-model failing to notice a real deviation can't silently result in an
-autonomous SUPPRESS.
+All settings come from the environment; see [`.env.example`](.env.example)
+for the full list with notes on what each one does.
+
+**Required:** `GCP_PROJECT`, `TASKS_LOCATION`, `TASKS_QUEUE`,
+`TASKS_OIDC_SA_EMAIL`, `SERVICE_URL`, plus the Vertex AI variables
+(`GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`,
+`GOOGLE_CLOUD_LOCATION`).
+
+**Optional, each with a working default:** `GEMINI_MODEL`,
+`FIRESTORE_DATABASE`, `MLFLOW_TRACKING_URI`, `MLFLOW_EXPERIMENT_NAME`,
+`SWEEP_MAX_TARGETS`, `BLAST_RADIUS_CACHE_TTL_SECONDS`.
+
+Secrets belong in `.env`, which is gitignored and must never be committed.
+
+Backend selection is environment-driven and read by `google-genai` rather
+than by this repo: setting the three Vertex AI variables routes model calls
+through Vertex AI using Application Default Credentials, so the Cloud Run
+service authenticates as itself instead of carrying an API key to rotate.
+
+---
+
+## Scripts
+
+```bash
+.venv/bin/python scripts/seed_firestore.py --case seeded_confirmed --dry-run
+.venv/bin/python scripts/seed_blast_radius_table.py
+.venv/bin/python scripts/backfill_identity_key.py --dry-run
+```
+
+`seed_firestore.py` loads confirmed-negative history — either a synthetic
+case or your own JSON export. `seed_blast_radius_table.py` populates the
+risk table on a fresh project. `backfill_identity_key.py` is a one-time
+migration for Firestore data predating the current doc-ID scheme.
+
+`seed_firestore.py` and `backfill_identity_key.py` both support
+`--dry-run`; use it first. `seed_blast_radius_table.py` takes no arguments
+and is idempotent — re-running rewrites the same entries with the same
+values.
+
+---
+
+## Documentation
+
+| Doc | What's in it |
+|---|---|
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Deploying to Cloud Run, Scheduler, Tasks and Pub/Sub |
+| [`docs/DATASET_RUNBOOK.md`](docs/DATASET_RUNBOOK.md) | The 6 synthetic cases and how to seed Firestore |
+| [`docs/TESTING_PLAN.md`](docs/TESTING_PLAN.md) | What's tested where, and what deliberately isn't |
+| [`docs/BLAST_RADIUS_PLAYBOOK.md`](docs/BLAST_RADIUS_PLAYBOOK.md) | How risk scores are set and promoted |
+| [`docs/AGENT_DATA_FLOW.md`](docs/AGENT_DATA_FLOW.md) | What each agent sees and when |
+| [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) | Archived rationale for the core design choices |
+
+---
 
 ## Known gaps
 
-**Identity-key round-trip fragility — resolved.** `_doc_id()` now hashes the
-identity_key tuple instead of joining it with `"_"`, and every write path
-stores `identity_key` as its own Firestore field; readers use that field
-instead of parsing the doc ID. See `docs/TODO-Aug15.md` Task 3.
-
-**Still open:** Firestore data written *before* that change has no
-`identity_key` field. `_fetch_all_confirmed_patterns()` skips and logs a
-warning for any doc missing it rather than crashing, so this is not a
-crash risk — but a one-time backfill is still needed before first deploy
-against pre-existing data. See `scripts/backfill_identity_key.py`.
-
-## Dataset and seeding
-
-The 6 synthetic dataset cases are generated by `vor_agents/datasets.py`,
-and `scripts/seed_firestore.py` seeds them — or your own real
-confirmed-negative history — into Firestore via
-`enrichment.seed_template()`. See `docs/DATASET_RUNBOOK.md` for what each
-case models and how to run both.
-
-## Not yet built
-- An exporter that turns raw Hayabusa/EVTX output into the JSON history
-  `scripts/seed_firestore.py --file` expects — that shape depends on your
-  ingest pipeline.
+- **Not yet run against a real model.** The integration suite exists but has
+  never been executed against a billed project, so the configured default
+  model ID is unverified. See `docs/TODO-Aug24.md` Task 8.
+- **Audit cost isn't throttled.** Every `SUPPRESS` enqueues an audit. Cloud
+  Tasks dedups concurrent audits for the same pattern, but there's no rate
+  limit or sampling — worth revisiting once real alert volume exists.
+- **`needs_attention` has no alerting.** Escalations are written to
+  Firestore and logged at CRITICAL, but nothing pushes them to a human yet.
+- **No dead-letter topic** on the Pub/Sub subscription, so a permanently
+  malformed message retries until it ages out.
+- **Thresholds are unvalidated starting points.** `GRADUATION_THRESHOLD`,
+  `MIN_DIVERSITY` and `AUDIT_FAILURE_ESCALATION_THRESHOLD` were chosen
+  without production data to calibrate against, and are flagged as such in
+  code.
+- **Pre-existing Firestore data needs a backfill.** Docs written before the
+  current doc-ID scheme have no `identity_key` field; readers skip them with
+  a warning rather than crashing. Run `scripts/backfill_identity_key.py`
+  before deploying against such data.
+- **No Hayabusa/EVTX exporter.** Turning raw output into the JSON that
+  `seed_firestore.py --file` expects depends on your ingest pipeline and
+  isn't built here.
