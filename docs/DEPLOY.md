@@ -99,9 +99,9 @@ you want:
 | `GEMINI_MODEL` | `DEFAULT_GEMINI_MODEL` (`vor_agents/model_config.py`) | Pinning or upgrading the model without a code deploy. |
 | `MLFLOW_EXPERIMENT_NAME` | MLflow's `Default` experiment | Always, on a shared tracking server — otherwise dev/staging/prod traces are indistinguishable after the fact. |
 | `SWEEP_MAX_TARGETS` | `10` | Tuning how much the weekly sweep costs. Every target is a model call, so this is the sweep's cost/coverage dial. Minimum 1; `0` is **rejected**, not honored — it would disable the safety-net audit path while looking like a sweep that found nothing. |
-| `TABLE_CACHE_TTL_SECONDS` | `300` | Trading Firestore reads against how fast a committed blast-radius entry goes live. `0` means never serve from cache. |
+| `BLAST_RADIUS_CACHE_TTL_SECONDS` | `300` | Trading Firestore reads against how fast a committed blast-radius entry goes live. `0` means never serve from cache. |
 
-`SWEEP_MAX_TARGETS` and `TABLE_CACHE_TTL_SECONDS` are integers. A value
+`SWEEP_MAX_TARGETS` and `BLAST_RADIUS_CACHE_TTL_SECONDS` are integers. A value
 that isn't a valid integer, or is below its minimum, is logged at WARNING
 and the default is used — a typo in a deploy flag must not take a request
 path down. Check the logs after changing either if the new value doesn't

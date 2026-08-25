@@ -49,8 +49,8 @@ BLAST_RADIUS_PROPOSALS_COLLECTION = "blast_radius_proposals"
 _TABLE_CACHE: dict[tuple[str, str], float] = {}
 _TABLE_CACHE_LOADED_AT: float | None = None
 
-DEFAULT_TABLE_CACHE_TTL_SECONDS = 300
-TABLE_CACHE_TTL_ENV_VAR = "TABLE_CACHE_TTL_SECONDS"
+DEFAULT_BLAST_RADIUS_CACHE_TTL_SECONDS = 300
+BLAST_RADIUS_CACHE_TTL_ENV_VAR = "BLAST_RADIUS_CACHE_TTL_SECONDS"
 # Per-process, TTL'd cache -- _fetch_all_confirmed_patterns() calls
 # estimate_blast_radius() once per confirmed instance per sweep; a
 # Firestore read per call would turn one sweep into O(instances) reads
@@ -64,10 +64,12 @@ TABLE_CACHE_TTL_ENV_VAR = "TABLE_CACHE_TTL_SECONDS"
 # rather pay the Firestore reads. Negative is meaningless.
 
 
-def _table_cache_ttl_seconds() -> int:
+def _blast_radius_cache_ttl_seconds() -> int:
     """TTL for the in-process blast-radius table cache, from
-    $TABLE_CACHE_TTL_SECONDS. Read per call, not bound at import."""
-    return env_int(TABLE_CACHE_TTL_ENV_VAR, DEFAULT_TABLE_CACHE_TTL_SECONDS, minimum=0)
+    $BLAST_RADIUS_CACHE_TTL_SECONDS. Read per call, not bound at import."""
+    return env_int(
+        BLAST_RADIUS_CACHE_TTL_ENV_VAR, DEFAULT_BLAST_RADIUS_CACHE_TTL_SECONDS, minimum=0
+    )
 
 
 def reset_table_cache() -> None:
@@ -102,7 +104,7 @@ def _load_table(firestore_client: Client) -> dict[tuple[str, str], float]:
     now = time.monotonic()
     if (
         _TABLE_CACHE_LOADED_AT is not None
-        and (now - _TABLE_CACHE_LOADED_AT) < _table_cache_ttl_seconds()
+        and (now - _TABLE_CACHE_LOADED_AT) < _blast_radius_cache_ttl_seconds()
     ):
         return _TABLE_CACHE
 

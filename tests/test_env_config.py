@@ -12,9 +12,9 @@ ValueError inside a Cloud Run request.
 import pytest
 
 from vor_agents.blast_radius import (
-    DEFAULT_TABLE_CACHE_TTL_SECONDS,
-    TABLE_CACHE_TTL_ENV_VAR,
-    _table_cache_ttl_seconds,
+    BLAST_RADIUS_CACHE_TTL_ENV_VAR,
+    DEFAULT_BLAST_RADIUS_CACHE_TTL_SECONDS,
+    _blast_radius_cache_ttl_seconds,
 )
 from vor_agents.env_config import env_int
 from vor_agents.orchestrator import (
@@ -100,30 +100,30 @@ class TestSweepMaxTargets:
         )
 
 
-class TestTableCacheTtl:
+class TestBlastRadiusCacheTtl:
     def test_default_when_unset(self, monkeypatch):
-        monkeypatch.delenv(TABLE_CACHE_TTL_ENV_VAR, raising=False)
+        monkeypatch.delenv(BLAST_RADIUS_CACHE_TTL_ENV_VAR, raising=False)
 
-        assert _table_cache_ttl_seconds() == DEFAULT_TABLE_CACHE_TTL_SECONDS
+        assert _blast_radius_cache_ttl_seconds() == DEFAULT_BLAST_RADIUS_CACHE_TTL_SECONDS
 
     def test_env_var_is_honored(self, monkeypatch):
-        monkeypatch.setenv(TABLE_CACHE_TTL_ENV_VAR, "60")
+        monkeypatch.setenv(BLAST_RADIUS_CACHE_TTL_ENV_VAR, "60")
 
-        assert _table_cache_ttl_seconds() == 60
+        assert _blast_radius_cache_ttl_seconds() == 60
 
     def test_zero_is_allowed(self, monkeypatch):
         """0 means "never serve from cache" -- valid for debugging a stale
         table, or a deployment happy to pay the Firestore reads."""
-        monkeypatch.setenv(TABLE_CACHE_TTL_ENV_VAR, "0")
+        monkeypatch.setenv(BLAST_RADIUS_CACHE_TTL_ENV_VAR, "0")
 
-        assert _table_cache_ttl_seconds() == 0
+        assert _blast_radius_cache_ttl_seconds() == 0
 
     def test_negative_falls_back(self, monkeypatch):
-        monkeypatch.setenv(TABLE_CACHE_TTL_ENV_VAR, "-1")
+        monkeypatch.setenv(BLAST_RADIUS_CACHE_TTL_ENV_VAR, "-1")
 
-        assert _table_cache_ttl_seconds() == DEFAULT_TABLE_CACHE_TTL_SECONDS
+        assert _blast_radius_cache_ttl_seconds() == DEFAULT_BLAST_RADIUS_CACHE_TTL_SECONDS
 
     def test_garbage_falls_back(self, monkeypatch):
-        monkeypatch.setenv(TABLE_CACHE_TTL_ENV_VAR, "five minutes")
+        monkeypatch.setenv(BLAST_RADIUS_CACHE_TTL_ENV_VAR, "five minutes")
 
-        assert _table_cache_ttl_seconds() == DEFAULT_TABLE_CACHE_TTL_SECONDS
+        assert _blast_radius_cache_ttl_seconds() == DEFAULT_BLAST_RADIUS_CACHE_TTL_SECONDS

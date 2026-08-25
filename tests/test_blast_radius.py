@@ -6,13 +6,13 @@ safety net, and the MEDIUM/LOW human-review gate.
 import pytest
 
 from vor_agents.blast_radius import (
+    BLAST_RADIUS_CACHE_TTL_ENV_VAR,
     BLAST_RADIUS_PROPOSALS_COLLECTION,
     BLAST_RADIUS_TABLE_COLLECTION,
     CRITICAL,
     HIGH,
     LOW,
     MEDIUM,
-    TABLE_CACHE_TTL_ENV_VAR,
     UNSCORED_DEFAULT,
     ProposalAlreadyResolvedError,
     ProposalNotFoundError,
@@ -119,7 +119,7 @@ class TestEstimateBlastRadiusFromFirestore:
         # env var rather than by patching a module attribute -- the TTL is
         # resolved per call now, so this exercises the real configuration
         # path instead of reaching past it.
-        monkeypatch.setenv(TABLE_CACHE_TTL_ENV_VAR, "0")
+        monkeypatch.setenv(BLAST_RADIUS_CACHE_TTL_ENV_VAR, "0")
 
         class _BoomCollection:
             def stream(self):
