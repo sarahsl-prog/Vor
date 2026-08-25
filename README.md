@@ -201,16 +201,18 @@ This closes the loop the original design flagged: the model's diffing was
 model failing to notice a real deviation can't silently result in an
 autonomous SUPPRESS.
 
-## Known gaps — not yet resolved
+## Known gaps
 
-(Identity-key round-trip fragility — fixed. `_doc_id()` now hashes the
+**Identity-key round-trip fragility — resolved.** `_doc_id()` now hashes the
 identity_key tuple instead of joining it with `"_"`, and every write path
 stores `identity_key` as its own Firestore field; readers use that field
-instead of parsing the doc ID. See `docs/TODO-Aug15.md` Task 3. Existing
-Firestore data written before this change won't have the `identity_key`
-field — `_fetch_all_confirmed_patterns()` skips and logs a warning for
-any doc missing it rather than crashing, but a one-time migration/backfill
-is still needed before this matters in a real deployment.)
+instead of parsing the doc ID. See `docs/TODO-Aug15.md` Task 3.
+
+**Still open:** Firestore data written *before* that change has no
+`identity_key` field. `_fetch_all_confirmed_patterns()` skips and logs a
+warning for any doc missing it rather than crashing, so this is not a
+crash risk — but a one-time backfill is still needed before first deploy
+against pre-existing data. See `scripts/backfill_identity_key.py`.
 
 ## Not yet built
 - Dataset generation for the 6 synthetic cases
