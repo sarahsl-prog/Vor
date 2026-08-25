@@ -6,6 +6,7 @@ safety net, and the MEDIUM/LOW human-review gate.
 import pytest
 
 from vor_agents.blast_radius import (
+    BLAST_RADIUS_CACHE_TTL_ENV_VAR,
     BLAST_RADIUS_PROPOSALS_COLLECTION,
     BLAST_RADIUS_TABLE_COLLECTION,
     CRITICAL,
@@ -114,7 +115,11 @@ class TestEstimateBlastRadiusFromFirestore:
         self._seed_entry(fake_firestore, "parent_image", "lsass.exe", 0.95)
         estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)  # populates cache
 
-        monkeypatch.setattr("vor_agents.blast_radius._TABLE_CACHE_TTL_SECONDS", 0)
+        # TTL 0 forces a refresh attempt on the next call. Set through the
+        # env var rather than by patching a module attribute -- the TTL is
+        # resolved per call now, so this exercises the real configuration
+        # path instead of reaching past it.
+        monkeypatch.setenv(BLAST_RADIUS_CACHE_TTL_ENV_VAR, "0")
 
         class _BoomCollection:
             def stream(self):

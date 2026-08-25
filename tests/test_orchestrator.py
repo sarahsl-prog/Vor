@@ -23,6 +23,8 @@ from vor_agents.enrichment import (
 )
 from vor_agents.identity import pattern_identity_key
 from vor_agents.orchestrator import (
+    DEFAULT_SWEEP_MAX_TARGETS,
+    SWEEP_MAX_TARGETS_ENV_VAR,
     AgentOutputError,
     _deviation_field_names,
     _run_agent,
@@ -991,3 +993,90 @@ class TestTracingWiring:
         await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
 
         assert captured["audit_failed"] is True
+
+
+class TestSweepMaxTargetsIsConfigurable:
+    """
+    $SWEEP_MAX_TARGETS caps how many patterns one sweep enqueues audits
+    for -- the sweep's cost dial, since every target is a model call.
+    These drive the real run_scheduled_sweep() rather than the parsing
+    helper, so a wiring mistake between the two is caught here.
+    """
+
+    def _seed_confirmed_patterns(self, fake_firestore, count):
+        """`count` distinct graduated patterns, each with enough diverse
+        evidence to reach confirmed tier and so be sweep-eligible."""
+        for index in range(count):
+            for instance_index, (host, user, timestamp) in enumerate(
+                [
+                    ("host1", "user1", "2026-08-01T09:00:00Z"),
+                    ("host2", "user2", "2026-08-03T14:00:00Z"),
+                    ("host3", "user3", "2026-08-05T22:00:00Z"),
+                ]
+            ):
+                record_confirmed_negative(
+                    {
+                        "detection_rule_id": f"rule_{index}",
+                        "parent_image": "parent.exe",
+                        "child_image": "child.exe",
+                        "endpoint_family": "family",
+                        "auth_method_present": True,
+                        "session_cookie_present": True,
+                        "integrity_level": "Medium",
+                        "file_access_mode": "read",
+                        "egress_follows_access": False,
+                        "host": host,
+                        "user": user,
+                        "timestamp": timestamp,
+                        "instance_id": f"i{index}_{instance_index}",
+                    },
+                    fake_firestore,
+                )
+
+    def test_env_var_caps_the_number_enqueued(self, fake_firestore, monkeypatch):
+        self._seed_confirmed_patterns(fake_firestore, 6)
+        monkeypatch.setenv(SWEEP_MAX_TARGETS_ENV_VAR, "2")
+
+        result = run_scheduled_sweep(fake_firestore, lambda identity_key, pattern_data: True)
+
+        assert len(result) == 2
+
+    def test_default_applies_when_unset(self, fake_firestore, monkeypatch):
+        self._seed_confirmed_patterns(fake_firestore, 12)
+        monkeypatch.delenv(SWEEP_MAX_TARGETS_ENV_VAR, raising=False)
+
+        result = run_scheduled_sweep(fake_firestore, lambda identity_key, pattern_data: True)
+
+        assert len(result) == DEFAULT_SWEEP_MAX_TARGETS
+
+    def test_explicit_argument_beats_the_env_var(self, fake_firestore, monkeypatch):
+        """A caller naming a value is never overridden by the environment."""
+        self._seed_confirmed_patterns(fake_firestore, 6)
+        monkeypatch.setenv(SWEEP_MAX_TARGETS_ENV_VAR, "2")
+
+        result = run_scheduled_sweep(
+            fake_firestore, lambda identity_key, pattern_data: True, max_targets=4
+        )
+
+        assert len(result) == 4
+
+    def test_garbage_value_falls_back_rather_than_failing_the_sweep(
+        self, fake_firestore, monkeypatch
+    ):
+        """A typo in the deploy flag must not take the sweep down."""
+        self._seed_confirmed_patterns(fake_firestore, 12)
+        monkeypatch.setenv(SWEEP_MAX_TARGETS_ENV_VAR, "lots")
+
+        result = run_scheduled_sweep(fake_firestore, lambda identity_key, pattern_data: True)
+
+        assert len(result) == DEFAULT_SWEEP_MAX_TARGETS
+
+    def test_zero_does_not_silently_disable_the_sweep(self, fake_firestore, monkeypatch):
+        """The dangerous misconfiguration: 0 targets looks exactly like a
+        healthy sweep with nothing to audit."""
+        self._seed_confirmed_patterns(fake_firestore, 12)
+        monkeypatch.setenv(SWEEP_MAX_TARGETS_ENV_VAR, "0")
+
+        result = run_scheduled_sweep(fake_firestore, lambda identity_key, pattern_data: True)
+
+        assert len(result) == DEFAULT_SWEEP_MAX_TARGETS

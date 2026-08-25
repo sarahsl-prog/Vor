@@ -23,6 +23,8 @@ from typing import Any
 from google.cloud.firestore import Client
 from loguru import logger
 
+from .env_config import env_int
+
 CRITICAL = 0.95
 HIGH = 0.75
 MEDIUM = 0.45
@@ -46,12 +48,28 @@ BLAST_RADIUS_PROPOSALS_COLLECTION = "blast_radius_proposals"
 
 _TABLE_CACHE: dict[tuple[str, str], float] = {}
 _TABLE_CACHE_LOADED_AT: float | None = None
-_TABLE_CACHE_TTL_SECONDS = 300
+
+DEFAULT_BLAST_RADIUS_CACHE_TTL_SECONDS = 300
+BLAST_RADIUS_CACHE_TTL_ENV_VAR = "BLAST_RADIUS_CACHE_TTL_SECONDS"
 # Per-process, TTL'd cache -- _fetch_all_confirmed_patterns() calls
 # estimate_blast_radius() once per confirmed instance per sweep; a
 # Firestore read per call would turn one sweep into O(instances) reads
 # for a table that changes rarely. 5 minutes is an unvalidated starting
-# point, same posture as GRADUATION_THRESHOLD elsewhere in this design.
+# point, same posture as GRADUATION_THRESHOLD elsewhere in this design --
+# which is exactly why it's worth being able to retune it from a deploy
+# flag rather than a code change.
+#
+# minimum=0 rather than 1: 0 means "never serve from cache", a legitimate
+# setting for debugging a stale table or for a deployment that would
+# rather pay the Firestore reads. Negative is meaningless.
+
+
+def _blast_radius_cache_ttl_seconds() -> int:
+    """TTL for the in-process blast-radius table cache, from
+    $BLAST_RADIUS_CACHE_TTL_SECONDS. Read per call, not bound at import."""
+    return env_int(
+        BLAST_RADIUS_CACHE_TTL_ENV_VAR, DEFAULT_BLAST_RADIUS_CACHE_TTL_SECONDS, minimum=0
+    )
 
 
 def reset_table_cache() -> None:
@@ -86,7 +104,7 @@ def _load_table(firestore_client: Client) -> dict[tuple[str, str], float]:
     now = time.monotonic()
     if (
         _TABLE_CACHE_LOADED_AT is not None
-        and (now - _TABLE_CACHE_LOADED_AT) < _TABLE_CACHE_TTL_SECONDS
+        and (now - _TABLE_CACHE_LOADED_AT) < _blast_radius_cache_ttl_seconds()
     ):
         return _TABLE_CACHE
 
