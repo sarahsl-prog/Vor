@@ -17,6 +17,7 @@ from google.adk.sessions import InMemorySessionService
 from google.cloud.firestore import Client
 from google.genai.types import Content, Part
 from loguru import logger
+from pydantic import ValidationError
 
 from .audit_targets import select_audit_targets
 from .auditor_agent import build_auditor_agent
@@ -58,6 +59,15 @@ class AgentOutputError(Exception):
     (classify_alert, audit_pattern) never see a raw stdlib exception, same
     "never surface raw exceptions" standard as MalformedAlertError in
     identity.py and AuditEnqueueError in task_queue.py.
+
+    ALSO wraps pydantic's ValidationError: because both agents set an
+    output_schema, ADK validates the model response against it inside the
+    Runner, so most real malformed-output cases surface as a
+    ValidationError from run_async rather than as a JSONDecodeError here.
+    Both are normalized to this one exception type so callers have a
+    single thing to catch — see _run_agent's except branch for why that
+    matters (an unconverted ValidationError bypasses the
+    degrade-to-UNCERTAIN path entirely and 500s /classify).
     """
 
 
@@ -71,19 +81,34 @@ async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[st
     )
     msg = Content(role="user", parts=[Part(text=prompt_text)])
     result_text = ""
-    async for event in runner.run_async(
-        user_id="vor-system", session_id=session_id, new_message=msg
-    ):
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                # getattr (not direct attribute access) so mypy sees an
-                # Any here rather than the declared str | None on
-                # part.text — the truthiness check already guarantees
-                # non-None/non-empty, but mypy can't narrow a separate
-                # attribute access through that guard.
-                text = getattr(part, "text", None)
-                if text:
-                    result_text += text
+    try:
+        async for event in runner.run_async(
+            user_id="vor-system", session_id=session_id, new_message=msg
+        ):
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    # getattr (not direct attribute access) so mypy sees an
+                    # Any here rather than the declared str | None on
+                    # part.text — the truthiness check already guarantees
+                    # non-None/non-empty, but mypy can't narrow a separate
+                    # attribute access through that guard.
+                    text = getattr(part, "text", None)
+                    if text:
+                        result_text += text
+    except ValidationError as exc:
+        # Both agents set output_schema, so ADK validates the model's
+        # response against it INSIDE the runner and raises pydantic's
+        # ValidationError before this function's own json.loads is ever
+        # reached. Without this branch that error propagates untouched
+        # through classify_alert()'s `except AgentOutputError` degrade
+        # path — which never fires — and out of /classify as a 500,
+        # leaving a Pub/Sub push subscription to redeliver the same
+        # poisoned alert until it ages out. Converting it here restores
+        # the documented contract (this function raises AgentOutputError
+        # when it cannot produce a dict) and lets the existing
+        # degrade-to-UNCERTAIN path do its job.
+        raise AgentOutputError(f"Model output failed schema validation: {exc}") from exc
+
     try:
         parsed: dict[str, Any] = json.loads(result_text)
         return parsed
