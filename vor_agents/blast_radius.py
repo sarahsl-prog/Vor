@@ -13,7 +13,11 @@ something HIGH/CRITICAL is the conservative move and can happen freely;
 scoring it MEDIUM/LOW requires a human to actually commit it.
 """
 
+import hashlib
+import json
 import time
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from google.cloud.firestore import Client
@@ -38,6 +42,7 @@ TIER_RANGES: dict[str, tuple[float, float]] = {
 }
 
 BLAST_RADIUS_TABLE_COLLECTION = "blast_radius_table"
+BLAST_RADIUS_PROPOSALS_COLLECTION = "blast_radius_proposals"
 
 _TABLE_CACHE: dict[tuple[str, str], float] = {}
 _TABLE_CACHE_LOADED_AT: float | None = None
@@ -134,30 +139,67 @@ def estimate_blast_radius(alert: dict[str, Any], firestore_client: Client) -> fl
     return max(matches) if matches else UNSCORED_DEFAULT
 
 
+def _table_doc_id(indicator_type: str, value: str) -> str:
+    """Content hash, not a raw f-string join -- same collision-avoidance
+    reasoning as enrichment._doc_id() and task_queue._task_name()."""
+    encoded = json.dumps([indicator_type, value], separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _parse_cited_indicator(indicator: str) -> tuple[str, str]:
+    """
+    cited_indicators entries are "indicator_type=value" strings (e.g.
+    "parent_image=lsass.exe") -- the format propose_blast_radius()'s
+    callers (human or an extended auditor LLM step) are expected to use.
+    Raises ValueError on anything else, same "fail loud on a malformed
+    proposal rather than silently write a wrong table entry" posture as
+    the tier/score validation already in this function.
+    """
+    if "=" not in indicator:
+        raise ValueError(
+            f"Malformed cited_indicator {indicator!r}; expected 'indicator_type=value'"
+        )
+    indicator_type, value = indicator.split("=", 1)
+    return indicator_type.strip(), value.strip()
+
+
+def _commit_indicators(cited_indicators: list[str], score: float, firestore_client: Client) -> None:
+    """Writes each cited indicator into blast_radius_table at the given
+    score, then invalidates the read cache so the next
+    estimate_blast_radius() call sees it without waiting out the TTL."""
+    for indicator in cited_indicators:
+        indicator_type, value = _parse_cited_indicator(indicator)
+        doc_id = _table_doc_id(indicator_type, value)
+        firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).document(doc_id).set(
+            {
+                "indicator_type": indicator_type,
+                "value": value,
+                "score": score,
+                "committed_at": datetime.now(UTC).isoformat(),
+            },
+            merge=True,
+        )
+    _invalidate_table_cache()
+
+
 def propose_blast_radius(
     identity_key: tuple[str, ...],
     proposed_tier: str,
     proposed_score: float,
     cited_indicators: list[str],
     rationale: str,
+    firestore_client: Client,
 ) -> dict[str, Any]:
     """
-    NOT auto-applied to BLAST_RADIUS_TABLE under any circumstances. Callable
-    by a human directly, or by an LLM step (e.g. an extended auditor pass)
-    proposing a new pattern be scored — either way this returns an inert
-    record. Promoting it into BLAST_RADIUS_TABLE is a manual code change
-    made after review against BLAST_RADIUS_PLAYBOOK.md, particularly for
-    any MEDIUM/LOW proposal, which is the direction that reduces scrutiny.
-
-    Raises ValueError for an unknown proposed_tier or a proposed_score
-    outside that tier's documented range (TIER_RANGES, from
-    BLAST_RADIUS_PLAYBOOK.md's Tiers section) — previously an unknown
-    tier silently fell through requires_review's `in ("MEDIUM", "LOW")`
-    check as False, and a tier/score mismatch (e.g. LOW with a CRITICAL-
-    range score) was accepted without complaint. Both are weak-API-
-    contract bugs a human reviewer downstream could be misled by, not
-    just cosmetic — the whole point of TIER_RANGES existing is that a
-    tier and its score are supposed to agree.
+    Validates tier/score exactly as before (raises ValueError for an
+    unknown tier or an out-of-range score -- unchanged). New in this
+    revision: persists the proposal to blast_radius_proposals instead of
+    just returning an inert dict, and CRITICAL/HIGH proposals commit
+    directly into blast_radius_table in the same call (the conservative
+    direction -- matches BLAST_RADIUS_PLAYBOOK.md's "may be added
+    directly" language). MEDIUM/LOW proposals are written with
+    status="pending_human_review" and NOT committed -- see
+    commit_blast_radius_proposal() for the human-gated commit path.
     """
     if proposed_tier not in TIER_RANGES:
         raise ValueError(
@@ -170,12 +212,24 @@ def propose_blast_radius(
             f"documented range [{low}, {high}] (see BLAST_RADIUS_PLAYBOOK.md)"
         )
 
-    return {
-        "identity_key": identity_key,
+    requires_review = proposed_tier in ("MEDIUM", "LOW")
+    proposal: dict[str, Any] = {
+        "proposal_id": str(uuid.uuid4()),
+        "identity_key": list(identity_key),
         "proposed_tier": proposed_tier,
         "proposed_score": proposed_score,
         "cited_indicators": cited_indicators,
         "rationale": rationale,
+        "proposed_at": datetime.now(UTC).isoformat(),
         "status": "pending_human_review",
-        "requires_review": proposed_tier in ("MEDIUM", "LOW"),
+        "requires_review": requires_review,
     }
+
+    if not requires_review:
+        _commit_indicators(cited_indicators, proposed_score, firestore_client)
+        proposal["status"] = "committed"
+
+    firestore_client.collection(BLAST_RADIUS_PROPOSALS_COLLECTION).document(
+        proposal["proposal_id"]
+    ).set(proposal)
+    return proposal

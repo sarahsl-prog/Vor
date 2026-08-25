@@ -6,6 +6,7 @@ safety net, and the MEDIUM/LOW human-review gate.
 import pytest
 
 from vor_agents.blast_radius import (
+    BLAST_RADIUS_PROPOSALS_COLLECTION,
     BLAST_RADIUS_TABLE_COLLECTION,
     CRITICAL,
     HIGH,
@@ -141,18 +142,22 @@ class TestEstimateBlastRadiusFromFirestore:
 
 
 class TestProposeBlastRadius:
-    def test_critical_proposal_does_not_require_review(self):
+    def setup_method(self):
+        reset_table_cache()
+
+    def test_critical_proposal_does_not_require_review(self, fake_firestore):
         proposal = propose_blast_radius(
             identity_key=("rule", "proc.exe", "child.exe", "family"),
             proposed_tier="CRITICAL",
             proposed_score=CRITICAL,
-            cited_indicators=["credential access"],
+            cited_indicators=["parent_image=proc.exe"],
             rationale="test",
+            firestore_client=fake_firestore,
         )
         assert proposal["requires_review"] is False
-        assert proposal["status"] == "pending_human_review"
+        assert proposal["status"] == "committed"
 
-    def test_medium_proposal_requires_review(self):
+    def test_medium_proposal_requires_review(self, fake_firestore):
         """The safety-critical assertion: a MEDIUM proposal (the
         direction that REDUCES scrutiny) must always be flagged for
         human review, matching the DOWNGRADE/RECOMMEND_UPGRADE asymmetry
@@ -161,18 +166,20 @@ class TestProposeBlastRadius:
             identity_key=("rule", "proc.exe", "child.exe", "family"),
             proposed_tier="MEDIUM",
             proposed_score=MEDIUM,
-            cited_indicators=["internal only"],
+            cited_indicators=["parent_image=proc.exe"],
             rationale="test",
+            firestore_client=fake_firestore,
         )
         assert proposal["requires_review"] is True
 
-    def test_low_proposal_requires_review(self):
+    def test_low_proposal_requires_review(self, fake_firestore):
         proposal = propose_blast_radius(
             identity_key=("rule", "proc.exe", "child.exe", "family"),
             proposed_tier="LOW",
             proposed_score=LOW,
-            cited_indicators=["standard user context"],
+            cited_indicators=["parent_image=proc.exe"],
             rationale="test",
+            firestore_client=fake_firestore,
         )
         assert proposal["requires_review"] is True
 
@@ -185,7 +192,7 @@ class TestProposeBlastRadius:
     # .test_medium/low_proposal_does_not_auto_commit, which assert via
     # estimate_blast_radius() against the real fake_firestore table.
 
-    def test_unknown_tier_rejected(self):
+    def test_unknown_tier_rejected(self, fake_firestore):
         """Regression coverage: an unknown proposed_tier used to fall
         through requires_review's `in ("MEDIUM", "LOW")` check as False,
         silently treating a typo'd or made-up tier as not needing human
@@ -195,11 +202,12 @@ class TestProposeBlastRadius:
                 identity_key=("rule", "proc.exe", "child.exe", "family"),
                 proposed_tier="SEVERE",
                 proposed_score=0.99,
-                cited_indicators=["test"],
+                cited_indicators=["test=x"],
                 rationale="test",
+                firestore_client=fake_firestore,
             )
 
-    def test_score_outside_tier_range_rejected(self):
+    def test_score_outside_tier_range_rejected(self, fake_firestore):
         """A tier/score mismatch (e.g. LOW tier with a CRITICAL-range
         score) used to be silently accepted, which could mislead a human
         reviewer relying on requires_review's tier-only gate while the
@@ -209,11 +217,12 @@ class TestProposeBlastRadius:
                 identity_key=("rule", "proc.exe", "child.exe", "family"),
                 proposed_tier="LOW",
                 proposed_score=CRITICAL,
-                cited_indicators=["test"],
+                cited_indicators=["test=x"],
                 rationale="test",
+                firestore_client=fake_firestore,
             )
 
-    def test_score_at_tier_boundary_accepted(self):
+    def test_score_at_tier_boundary_accepted(self, fake_firestore):
         """Boundary values are inclusive per BLAST_RADIUS_PLAYBOOK.md's
         "0.90-1.0" style ranges — 0.90 is a valid CRITICAL score, not a
         rejected edge case."""
@@ -221,7 +230,90 @@ class TestProposeBlastRadius:
             identity_key=("rule", "proc.exe", "child.exe", "family"),
             proposed_tier="CRITICAL",
             proposed_score=0.90,
-            cited_indicators=["test"],
+            cited_indicators=["parent_image=proc.exe"],
             rationale="test",
+            firestore_client=fake_firestore,
         )
         assert proposal["proposed_score"] == 0.90
+
+
+class TestProposeBlastRadiusStorage:
+    def setup_method(self):
+        reset_table_cache()
+
+    def test_critical_proposal_auto_commits(self, fake_firestore):
+        result = propose_blast_radius(
+            ("rule", "p.exe", "c.exe", "family"),
+            "CRITICAL",
+            0.95,
+            ["parent_image=p.exe"],
+            "reads credential material",
+            fake_firestore,
+        )
+
+        assert result["status"] == "committed"
+        score = estimate_blast_radius({"parent_image": "p.exe"}, fake_firestore)
+        assert score == 0.95
+
+    def test_high_proposal_auto_commits(self, fake_firestore):
+        result = propose_blast_radius(
+            ("rule", "p.exe", "c.exe", "family"),
+            "HIGH",
+            0.75,
+            ["parent_image=p.exe"],
+            "internet-facing service",
+            fake_firestore,
+        )
+
+        assert result["status"] == "committed"
+
+    def test_medium_proposal_does_not_auto_commit(self, fake_firestore):
+        result = propose_blast_radius(
+            ("rule", "p.exe", "c.exe", "family"),
+            "MEDIUM",
+            0.45,
+            ["parent_image=p.exe"],
+            "internal service account",
+            fake_firestore,
+        )
+
+        assert result["status"] == "pending_human_review"
+        score = estimate_blast_radius({"parent_image": "p.exe"}, fake_firestore)
+        assert score == UNSCORED_DEFAULT  # not committed to the table
+
+    def test_low_proposal_does_not_auto_commit(self, fake_firestore):
+        result = propose_blast_radius(
+            ("rule", "p.exe", "c.exe", "family"),
+            "LOW",
+            0.15,
+            ["parent_image=p.exe"],
+            "ordinary user-context app",
+            fake_firestore,
+        )
+
+        assert result["status"] == "pending_human_review"
+
+    def test_proposal_is_persisted_and_retrievable(self, fake_firestore):
+        result = propose_blast_radius(
+            ("rule", "p.exe", "c.exe", "family"),
+            "MEDIUM",
+            0.45,
+            ["parent_image=p.exe"],
+            "internal service account",
+            fake_firestore,
+        )
+
+        doc = (
+            fake_firestore.collection(BLAST_RADIUS_PROPOSALS_COLLECTION)
+            .document(result["proposal_id"])
+            .get()
+        )
+        assert doc.exists
+        assert doc.to_dict()["proposed_tier"] == "MEDIUM"
+
+    def test_unknown_tier_still_raises_before_any_write(self, fake_firestore):
+        with pytest.raises(ValueError):
+            propose_blast_radius(
+                ("rule", "p.exe", "c.exe", "family"), "SEVERE", 0.5, [], "x", fake_firestore
+            )
+        assert list(fake_firestore.collection(BLAST_RADIUS_PROPOSALS_COLLECTION).stream()) == []
