@@ -50,6 +50,7 @@ from loguru import logger
 
 from vor_agents.datasets import DatasetCase, UnknownDatasetCaseError, generate_case
 from vor_agents.enrichment import seed_template
+from vor_agents.firestore_config import firestore_database
 from vor_agents.identity import (
     MalformedAlertError,
     build_structural_template,
@@ -168,7 +169,9 @@ def main() -> int:
         return 2
 
     try:
-        summary = seed(instances, firestore.Client(), dry_run=args.dry_run)
+        summary = seed(
+            instances, firestore.Client(database=firestore_database()), dry_run=args.dry_run
+        )
     except MalformedAlertError as exc:
         # seed_template -> build_structural_template validates DIFFABLE_FIELDS;
         # surfaced as a clear message rather than a traceback, per this
