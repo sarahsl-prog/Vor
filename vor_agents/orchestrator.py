@@ -24,6 +24,7 @@ from .auditor_agent import build_auditor_agent
 from .blast_radius import estimate_blast_radius
 from .classifier_agent import build_classifier_agent
 from .enrichment import CONFIDENCE_COLLECTION, _doc_id, enrich
+from .env_config import env_int
 from .evidence_diversity import evidence_diversity_score
 from .identity import diff_alert_against_template
 from .review_flag import (
@@ -44,6 +45,15 @@ from .tracing import log_audit_trace, log_classification_trace
 session_service = InMemorySessionService()  # swap for a persistent
 # SessionService in production;
 # fine for a hackathon demo
+
+DEFAULT_SWEEP_MAX_TARGETS = 10
+SWEEP_MAX_TARGETS_ENV_VAR = "SWEEP_MAX_TARGETS"
+# How many patterns one scheduled sweep enqueues audits for. This is the
+# sweep's cost/coverage dial -- every target is a model call -- and the
+# right value depends on alert volume and model spend, neither of which
+# is knowable from here. minimum=1, deliberately: 0 would silently
+# disable the entire safety-net path while looking exactly like "the
+# sweep ran and found nothing to audit."
 
 AUDIT_FAILURE_ESCALATION_THRESHOLD = 3
 # Unvalidated starting point, same posture as GRADUATION_THRESHOLD /
@@ -534,7 +544,7 @@ async def audit_pattern(
 def run_scheduled_sweep(
     firestore_client: Client,
     enqueue_audit_fn: Callable[[tuple[str, ...], dict[str, Any]], bool],
-    max_targets: int = 10,
+    max_targets: int | None = None,
 ) -> list[tuple[str, ...]]:
     """
     Safety-net path — invoked on a timer (e.g. weekly Cloud Scheduler job
@@ -556,7 +566,15 @@ def run_scheduled_sweep(
     called directly: this function doesn't need to know Cloud Tasks
     config specifics (queue path, audit URL, OIDC service account) any
     more than it needs to know how firestore_client was constructed.
+
+    max_targets=None resolves from $SWEEP_MAX_TARGETS, else
+    DEFAULT_SWEEP_MAX_TARGETS. An explicit argument always wins, so a
+    caller or a test naming a value is never overridden by the
+    environment.
     """
+    if max_targets is None:
+        max_targets = env_int(SWEEP_MAX_TARGETS_ENV_VAR, DEFAULT_SWEEP_MAX_TARGETS, minimum=1)
+
     all_confirmed = _fetch_all_confirmed_patterns(firestore_client)
     targets = select_audit_targets(all_confirmed, max_targets=max_targets)
 
