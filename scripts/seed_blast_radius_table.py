@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from google.cloud import firestore
 
 from vor_agents.blast_radius import _commit_indicators
+from vor_agents.firestore_config import firestore_database
 
 # (indicator, score) -- matches the original BLAST_RADIUS_TABLE dict
 # exactly, tier constants inlined as their point values since the
@@ -39,7 +40,7 @@ SEED_ENTRIES: list[tuple[str, float]] = [
 
 
 def main() -> None:
-    client = firestore.Client()
+    client = firestore.Client(database=firestore_database())
     for indicator, score in SEED_ENTRIES:
         _commit_indicators([indicator], score, client)
     print(f"Seeded {len(SEED_ENTRIES)} blast-radius table entries into Firestore.")

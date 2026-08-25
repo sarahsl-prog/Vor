@@ -46,6 +46,7 @@ from google.cloud.firestore import Client
 from loguru import logger
 
 from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
+from vor_agents.firestore_config import firestore_database
 from vor_agents.identity import pattern_identity_key
 
 
@@ -154,7 +155,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    counts = backfill(firestore.Client(), dry_run=args.dry_run)
+    counts = backfill(firestore.Client(database=firestore_database()), dry_run=args.dry_run)
 
     prefix = "[dry-run] would migrate" if args.dry_run else "Migrated"
     print(

@@ -43,6 +43,7 @@ from vor_agents.blast_radius import (
     ProposalNotFoundError,
     commit_blast_radius_proposal,
 )
+from vor_agents.firestore_config import firestore_database
 from vor_agents.identity import MalformedAlertError
 from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
 from vor_agents.schemas import (
@@ -64,7 +65,7 @@ def get_firestore_client() -> firestore.Client:
     # cold start path that doesn't need it (e.g. /healthz).
     global _firestore_client
     if _firestore_client is None:
-        _firestore_client = firestore.Client()
+        _firestore_client = firestore.Client(database=firestore_database())
     return _firestore_client
 
 

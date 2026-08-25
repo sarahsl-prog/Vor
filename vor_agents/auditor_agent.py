@@ -13,7 +13,9 @@ NO_ACTION / DOWNGRADE / RECOMMEND_UPGRADE_FOR_HUMAN_REVIEW and explain why.
 """
 
 from google.adk.agents import Agent
+from google.adk.models.base_llm import BaseLlm
 
+from .model_config import resolve_model
 from .schemas import AuditorOutput
 
 AUDITOR_SYSTEM_PROMPT = """You are a red-team auditor reviewing a past SUPPRESS decision made by a
@@ -60,10 +62,15 @@ invalidated_instance_ids empty.
 """
 
 
-def build_auditor_agent(model: str = "gemini-2.0-flash") -> Agent:
+def build_auditor_agent(model: str | BaseLlm | None = None) -> Agent:
+    """
+    model=None resolves through resolve_model(): $GEMINI_MODEL if set,
+    otherwise DEFAULT_GEMINI_MODEL. Resolved per call, not bound at import
+    — see model_config.py for why that distinction matters.
+    """
     return Agent(
         name="vor_auditor",
-        model=model,
+        model=resolve_model(model),
         instruction=AUDITOR_SYSTEM_PROMPT,
         description=(
             "Adversarially reviews past SUPPRESS decisions, prioritized by "

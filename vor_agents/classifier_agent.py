@@ -9,7 +9,9 @@ whole output_schema-vs-tools question rather than depending on it.
 """
 
 from google.adk.agents import Agent
+from google.adk.models.base_llm import BaseLlm
 
+from .model_config import resolve_model
 from .schemas import ClassifierOutput
 
 CLASSIFIER_SYSTEM_PROMPT = """You are an alert triage classifier for Windows Event Log / Sysmon data.
@@ -76,16 +78,20 @@ invariants over your own priors about typical behavior.
 """
 
 
-def build_classifier_agent(model: str = "gemini-2.0-flash") -> Agent:
+def build_classifier_agent(model: str | BaseLlm | None = None) -> Agent:
     """
     Flash is the right default here — this is a diffing/classification task
     against pre-fetched structured context, not open-ended reasoning. Escalate
     to a Pro model only if you find Flash missing subtle multi-field
     deviations during testing against dataset case #6.
+
+    model=None resolves through resolve_model(): $GEMINI_MODEL if set,
+    otherwise DEFAULT_GEMINI_MODEL. Resolved per call, not bound at import
+    — see model_config.py for why that distinction matters.
     """
     return Agent(
         name="vor_classifier",
-        model=model,
+        model=resolve_model(model),
         instruction=CLASSIFIER_SYSTEM_PROMPT,
         description=(
             "Classifies enriched Windows Event Log alerts as SUPPRESS, "
