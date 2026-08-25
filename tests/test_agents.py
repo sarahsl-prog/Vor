@@ -18,6 +18,11 @@ import pytest
 
 from vor_agents.auditor_agent import AUDITOR_SYSTEM_PROMPT, build_auditor_agent
 from vor_agents.classifier_agent import CLASSIFIER_SYSTEM_PROMPT, build_classifier_agent
+from vor_agents.model_config import (
+    DEFAULT_GEMINI_MODEL,
+    GEMINI_MODEL_ENV_VAR,
+    resolve_model,
+)
 from vor_agents.schemas import AuditorOutput, ClassifierOutput
 
 
@@ -68,3 +73,60 @@ class TestSystemPrompts:
         perfectly happily -- the one failure mode of a prompt-only module
         that silence would hide."""
         assert prompt.strip()
+
+
+class TestModelResolution:
+    """
+    REGRESSION: the model default was originally written as
+    `def build(model=os.environ.get("GEMINI_MODEL", ...))`, which evaluates
+    the lookup once at import and binds it for the process lifetime. That
+    silently ignored any value set after import and made the setting
+    impossible to monkeypatch -- i.e. the configurability was untestable,
+    and these tests could not have been written against it.
+    """
+
+    def test_default_when_env_var_unset(self, monkeypatch):
+        monkeypatch.delenv(GEMINI_MODEL_ENV_VAR, raising=False)
+
+        assert resolve_model() == DEFAULT_GEMINI_MODEL
+
+    def test_env_var_is_read_at_call_time(self, monkeypatch):
+        """The whole point: set it after import, and it still takes."""
+        monkeypatch.setenv(GEMINI_MODEL_ENV_VAR, "gemini-2.0-flash")
+
+        assert resolve_model() == "gemini-2.0-flash"
+
+    def test_env_var_change_takes_effect_between_calls(self, monkeypatch):
+        monkeypatch.setenv(GEMINI_MODEL_ENV_VAR, "model-a")
+        first = resolve_model()
+        monkeypatch.setenv(GEMINI_MODEL_ENV_VAR, "model-b")
+        second = resolve_model()
+
+        assert (first, second) == ("model-a", "model-b")
+
+    def test_explicit_argument_beats_the_env_var(self, monkeypatch):
+        """An operator or a test naming a model explicitly always wins."""
+        monkeypatch.setenv(GEMINI_MODEL_ENV_VAR, "from-env")
+
+        assert resolve_model("explicit") == "explicit"
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_env_var_falls_back_to_the_default(self, monkeypatch, blank):
+        """An unset var in a deploy script usually arrives as "". Passing
+        that through would fail at model-call time with an empty model
+        name, which is far harder to diagnose than a fallback."""
+        monkeypatch.setenv(GEMINI_MODEL_ENV_VAR, blank)
+
+        assert resolve_model() == DEFAULT_GEMINI_MODEL
+
+    @pytest.mark.parametrize("build", [build_classifier_agent, build_auditor_agent])
+    def test_builders_honor_the_env_var(self, monkeypatch, build):
+        monkeypatch.setenv(GEMINI_MODEL_ENV_VAR, "gemini-2.0-flash")
+
+        assert build().model == "gemini-2.0-flash"
+
+    @pytest.mark.parametrize("build", [build_classifier_agent, build_auditor_agent])
+    def test_builders_default_when_env_var_unset(self, monkeypatch, build):
+        monkeypatch.delenv(GEMINI_MODEL_ENV_VAR, raising=False)
+
+        assert build().model == DEFAULT_GEMINI_MODEL
