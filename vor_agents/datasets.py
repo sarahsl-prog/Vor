@@ -173,7 +173,13 @@ def generate_case(case: DatasetCase | str, seed: int = 0) -> dict[str, Any]:
             f"Unknown dataset case '{case}'. Valid cases: {valid}"
         ) from exc
 
-    rng = random.Random(seed)
+    # nosec B311 -- random is exactly right here: this generates
+    # synthetic TEST data and reproducibility is a hard requirement (see
+    # this module's docstring). A CSPRNG cannot be seeded to produce
+    # identical output across runs, which is the whole point. Suppressed
+    # at this line rather than skipped project-wide so a genuinely
+    # security-relevant random call elsewhere still trips the check.
+    rng = random.Random(seed)  # nosec B311
 
     if case is DatasetCase.SEEDED_CONFIRMED:
         instances = [_instance(i, rng, _BASELINE_STRUCTURE, _BASELINE_IDENTITY) for i in range(5)]
