@@ -182,6 +182,18 @@ def _commit_indicators(cited_indicators: list[str], score: float, firestore_clie
     _invalidate_table_cache()
 
 
+class ProposalNotFoundError(Exception):
+    """Raised when POST /blast-radius/commit references a proposal_id
+    that doesn't exist in blast_radius_proposals."""
+
+
+class ProposalAlreadyResolvedError(Exception):
+    """Raised when a commit is attempted on a proposal whose status isn't
+    pending_human_review -- no double-commit, whether it was already
+    manually committed or was auto-committed at proposal time (CRITICAL/
+    HIGH)."""
+
+
 def propose_blast_radius(
     identity_key: tuple[str, ...],
     proposed_tier: str,
@@ -233,3 +245,31 @@ def propose_blast_radius(
         proposal["proposal_id"]
     ).set(proposal)
     return proposal
+
+
+def commit_blast_radius_proposal(proposal_id: str, firestore_client: Client) -> dict[str, Any]:
+    """
+    Human-triggered commit for a pending MEDIUM/LOW proposal -- see
+    main.py's POST /blast-radius/commit, the only caller. Writes the
+    proposal's cited indicators into blast_radius_table at its
+    proposed_score, marks the proposal committed, returns the updated
+    proposal dict.
+    """
+    doc_ref = firestore_client.collection(BLAST_RADIUS_PROPOSALS_COLLECTION).document(proposal_id)
+    doc = doc_ref.get()
+    if not doc.exists:
+        raise ProposalNotFoundError(f"No blast-radius proposal with id {proposal_id!r}")
+
+    data = doc.to_dict() or {}
+    if data.get("status") != "pending_human_review":
+        raise ProposalAlreadyResolvedError(
+            f"Proposal {proposal_id!r} already has status {data.get('status')!r}, "
+            "not pending_human_review"
+        )
+
+    _commit_indicators(data["cited_indicators"], data["proposed_score"], firestore_client)
+    committed_at = datetime.now(UTC).isoformat()
+    doc_ref.update({"status": "committed", "committed_at": committed_at})
+    data["status"] = "committed"
+    data["committed_at"] = committed_at
+    return data

@@ -13,6 +13,9 @@ from vor_agents.blast_radius import (
     LOW,
     MEDIUM,
     UNSCORED_DEFAULT,
+    ProposalAlreadyResolvedError,
+    ProposalNotFoundError,
+    commit_blast_radius_proposal,
     estimate_blast_radius,
     propose_blast_radius,
     reset_table_cache,
@@ -317,3 +320,54 @@ class TestProposeBlastRadiusStorage:
                 ("rule", "p.exe", "c.exe", "family"), "SEVERE", 0.5, [], "x", fake_firestore
             )
         assert list(fake_firestore.collection(BLAST_RADIUS_PROPOSALS_COLLECTION).stream()) == []
+
+
+class TestCommitBlastRadiusProposal:
+    def setup_method(self):
+        reset_table_cache()
+
+    def test_commits_a_pending_medium_proposal(self, fake_firestore):
+        proposal = propose_blast_radius(
+            ("rule", "p.exe", "c.exe", "family"),
+            "MEDIUM",
+            0.45,
+            ["parent_image=p.exe"],
+            "internal service account",
+            fake_firestore,
+        )
+
+        result = commit_blast_radius_proposal(proposal["proposal_id"], fake_firestore)
+
+        assert result["status"] == "committed"
+        assert estimate_blast_radius({"parent_image": "p.exe"}, fake_firestore) == 0.45
+
+    def test_unknown_proposal_id_raises_not_found(self, fake_firestore):
+        with pytest.raises(ProposalNotFoundError):
+            commit_blast_radius_proposal("does-not-exist", fake_firestore)
+
+    def test_already_committed_proposal_raises_already_resolved(self, fake_firestore):
+        proposal = propose_blast_radius(
+            ("rule", "p.exe", "c.exe", "family"),
+            "MEDIUM",
+            0.45,
+            ["parent_image=p.exe"],
+            "internal service account",
+            fake_firestore,
+        )
+        commit_blast_radius_proposal(proposal["proposal_id"], fake_firestore)
+
+        with pytest.raises(ProposalAlreadyResolvedError):
+            commit_blast_radius_proposal(proposal["proposal_id"], fake_firestore)
+
+    def test_auto_committed_critical_proposal_cannot_be_recommitted(self, fake_firestore):
+        proposal = propose_blast_radius(
+            ("rule", "p.exe", "c.exe", "family"),
+            "CRITICAL",
+            0.95,
+            ["parent_image=p.exe"],
+            "reads credential material",
+            fake_firestore,
+        )
+
+        with pytest.raises(ProposalAlreadyResolvedError):
+            commit_blast_radius_proposal(proposal["proposal_id"], fake_firestore)
