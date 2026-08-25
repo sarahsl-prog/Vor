@@ -13,6 +13,8 @@ Usage:
     .venv/bin/python scripts/seed_blast_radius_table.py
 """
 
+import os
+
 from google.cloud import firestore
 
 from vor_agents.blast_radius import _commit_indicators
@@ -30,7 +32,8 @@ SEED_ENTRIES: list[tuple[str, float]] = [
 
 
 def main() -> None:
-    client = firestore.Client()
+    db_name = os.environ.get("FIRESTORE_DATABASE", "(default)")
+    client = firestore.Client(database=db_name)
     for indicator, score in SEED_ENTRIES:
         _commit_indicators([indicator], score, client)
     print(f"Seeded {len(SEED_ENTRIES)} blast-radius table entries into Firestore.")

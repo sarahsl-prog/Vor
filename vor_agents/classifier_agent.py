@@ -8,6 +8,8 @@ and does nothing but reason + emit structured output. This sidesteps the
 whole output_schema-vs-tools question rather than depending on it.
 """
 
+import os
+
 from google.adk.agents import Agent
 
 from .schemas import ClassifierOutput
@@ -76,7 +78,9 @@ invariants over your own priors about typical behavior.
 """
 
 
-def build_classifier_agent(model: str = "gemini-2.0-flash") -> Agent:
+def build_classifier_agent(
+    model: str = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+) -> Agent:
     """
     Flash is the right default here — this is a diffing/classification task
     against pre-fetched structured context, not open-ended reasoning. Escalate

@@ -64,7 +64,9 @@ def get_firestore_client() -> firestore.Client:
     # cold start path that doesn't need it (e.g. /healthz).
     global _firestore_client
     if _firestore_client is None:
-        _firestore_client = firestore.Client()
+        _firestore_client = firestore.Client(
+            database=os.environ.get("FIRESTORE_DATABASE", "(default)")
+        )
     return _firestore_client
 
 

@@ -12,6 +12,8 @@ inside the agent. The auditor's LLM call has exactly one job — decide
 NO_ACTION / DOWNGRADE / RECOMMEND_UPGRADE_FOR_HUMAN_REVIEW and explain why.
 """
 
+import os
+
 from google.adk.agents import Agent
 
 from .schemas import AuditorOutput
@@ -60,7 +62,7 @@ invalidated_instance_ids empty.
 """
 
 
-def build_auditor_agent(model: str = "gemini-2.0-flash") -> Agent:
+def build_auditor_agent(model: str = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")) -> Agent:
     return Agent(
         name="vor_auditor",
         model=model,
