@@ -17,6 +17,7 @@ from google.adk.sessions import InMemorySessionService
 from google.cloud.firestore import Client
 from google.genai.types import Content, Part
 from loguru import logger
+from pydantic import ValidationError
 
 from .audit_targets import select_audit_targets
 from .auditor_agent import build_auditor_agent
@@ -58,7 +59,33 @@ class AgentOutputError(Exception):
     (classify_alert, audit_pattern) never see a raw stdlib exception, same
     "never surface raw exceptions" standard as MalformedAlertError in
     identity.py and AuditEnqueueError in task_queue.py.
+
+    ALSO wraps pydantic's ValidationError: because both agents set an
+    output_schema, ADK validates the model response against it inside the
+    Runner, so most real malformed-output cases surface as a
+    ValidationError from run_async rather than as a JSONDecodeError here.
+    Both are normalized to this one exception type so callers have a
+    single thing to catch — see _run_agent's except branch for why that
+    matters (an unconverted ValidationError bypasses the
+    degrade-to-UNCERTAIN path entirely and 500s /classify).
     """
+
+
+async def _discard_session(session_id: str) -> None:
+    """
+    Drops the per-call session created by auto_create_session.
+
+    Deliberately best-effort: a session that can't be deleted is a slow
+    resource leak, never a reason to fail a classification or an audit
+    that already produced a usable answer. Logged rather than raised,
+    same posture as _enqueue()'s Cloud Tasks handling in main.py.
+    """
+    try:
+        await session_service.delete_session(
+            app_name="vor", user_id="vor-system", session_id=session_id
+        )
+    except Exception as exc:  # noqa: BLE001 — deliberate, see docstring.
+        logger.bind(session_id=session_id).warning("Could not delete session: {}", repr(exc))
 
 
 async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[str, Any]:
@@ -71,11 +98,34 @@ async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[st
     )
     msg = Content(role="user", parts=[Part(text=prompt_text)])
     result_text = ""
-    async for event in runner.run_async(
-        user_id="vor-system", session_id=session_id, new_message=msg
-    ):
-        if event.content and event.content.parts:
+    try:
+        async for event in runner.run_async(
+            user_id="vor-system", session_id=session_id, new_message=msg
+        ):
+            # Streaming chunks, when a RunConfig enables them, are ALSO
+            # re-delivered in the aggregated non-partial event that
+            # follows. Accumulating both would concatenate the JSON to
+            # itself and fail to parse. Default RunConfig doesn't stream,
+            # so this guards the seam rather than today's behavior.
+            if event.partial:
+                continue
+            if not (event.content and event.content.parts):
+                continue
             for part in event.content.parts:
+                # Thought summaries arrive as ordinary text parts flagged
+                # thought=True. They're prose reasoning, not the
+                # structured output, so concatenating them produces
+                # unparseable JSON — degrading EVERY classification to
+                # UNCERTAIN and marking EVERY audit failed, a silent total
+                # loss of autonomous suppression that looks like caution.
+                # ADK strips thoughts from outbound requests but not from
+                # the response stream, so filtering is the caller's job.
+                # Not reachable on gemini-2.0-flash today, but
+                # build_classifier_agent()'s own docstring points at
+                # escalating to a Pro model, and thinking models emit
+                # these.
+                if getattr(part, "thought", None):
+                    continue
                 # getattr (not direct attribute access) so mypy sees an
                 # Any here rather than the declared str | None on
                 # part.text — the truthiness check already guarantees
@@ -84,6 +134,30 @@ async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[st
                 text = getattr(part, "text", None)
                 if text:
                     result_text += text
+    except ValidationError as exc:
+        # Both agents set output_schema, so ADK validates the model's
+        # response against it INSIDE the runner and raises pydantic's
+        # ValidationError before this function's own json.loads is ever
+        # reached. Without this branch that error propagates untouched
+        # through classify_alert()'s `except AgentOutputError` degrade
+        # path — which never fires — and out of /classify as a 500,
+        # leaving a Pub/Sub push subscription to redeliver the same
+        # poisoned alert until it ages out. Converting it here restores
+        # the documented contract (this function raises AgentOutputError
+        # when it cannot produce a dict) and lets the existing
+        # degrade-to-UNCERTAIN path do its job.
+        raise AgentOutputError(f"Model output failed schema validation: {exc}") from exc
+    finally:
+        # Both of these leak without explicit cleanup: Runner holds
+        # plugin/agent resources, and auto_create_session=True registers a
+        # session per call under a uuid4-suffixed ID that is never reused.
+        # On a long-lived Cloud Run instance serving a real alert stream
+        # that grows without bound until the instance is recycled or OOMs.
+        # In a finally block so an exception mid-stream still releases
+        # them.
+        await runner.close()
+        await _discard_session(session_id)
+
     try:
         parsed: dict[str, Any] = json.loads(result_text)
         return parsed

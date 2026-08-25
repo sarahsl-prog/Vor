@@ -678,8 +678,11 @@ class TestFailureCountBlocksSuppress:
 
 
 class _FakePart:
-    def __init__(self, text):
+    def __init__(self, text, thought=None):
         self.text = text
+        # Thought summaries are skipped by _run_agent; modeled here so the
+        # double matches the real Part interface it stands in for.
+        self.thought = thought
 
 
 class _FakeContent:
@@ -688,19 +691,30 @@ class _FakeContent:
 
 
 class _FakeEvent:
-    def __init__(self, text):
+    def __init__(self, text, partial=None):
         self.content = _FakeContent([_FakePart(text)])
+        # _run_agent skips partial (streaming) events so their text isn't
+        # counted twice alongside the aggregated event that follows.
+        self.partial = partial
 
 
 class _FakeRunner:
     """Stand-in for google.adk.runners.Runner — yields one event carrying
-    whatever raw text the test wants _run_agent to try to json.loads()."""
+    whatever raw text the test wants _run_agent to try to json.loads().
+
+    close() is part of the real Runner's interface and _run_agent now
+    calls it in a finally block to release per-call resources; a double
+    that omits it would pass here while the real path leaked."""
 
     def __init__(self, *, response_text, **kwargs):
         self._response_text = response_text
+        self.closed = False
 
     async def run_async(self, *, user_id, session_id, new_message):
         yield _FakeEvent(self._response_text)
+
+    async def close(self):
+        self.closed = True
 
 
 @pytest.mark.asyncio
