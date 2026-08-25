@@ -80,9 +80,10 @@ outstanding-decisions discussion.
   Ready for implementation.
 
 ### Task 7 — Blast-radius table promotion workflow
-- [ ] Outstanding decision #6, still open. `propose_blast_radius()` returns inert pending records
-  forever; nothing commits a MEDIUM/LOW proposal into `BLAST_RADIUS_TABLE`. Confirm this is
-  intentionally manual-forever, or design the missing commit step.
+- [x] Outstanding decision #6. **Resolved** — see
+  `docs/superpowers/plans/2026-08-24-blast-radius-firestore.md`. `BLAST_RADIUS_TABLE` is now
+  Firestore-backed (`vor_agents/blast_radius.py`), CRITICAL/HIGH proposals auto-commit,
+  MEDIUM/LOW sit pending until a human calls `POST /blast-radius/commit`.
 - [x] **Decision (2026-08-24): build a review/commit step.**
 - [x] **Sub-decision: move `BLAST_RADIUS_TABLE` to a Firestore-backed table.** A commit
   endpoint/step writes directly to Firestore — no code deploy needed to add an entry. Real

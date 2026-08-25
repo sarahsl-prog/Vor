@@ -28,7 +28,7 @@
 **Interfaces:**
 - Produces: `_FakeCollection.stream() -> Iterator[_FakeDocSnapshot]` — yields every doc in the collection regardless of field values (unlike the existing `.where(...).stream()`, which filters first). Consumed by Task 2's `estimate_blast_radius()`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/conftest.py`, right after the existing `FakeFirestoreClient` tests would live — actually there's no dedicated fixture test file, so add this as a small inline sanity check in a new `tests/test_conftest_fakes.py`:
 
@@ -52,12 +52,12 @@ def test_fake_collection_stream_empty_collection_yields_nothing(fake_firestore):
     assert list(fake_firestore.collection("empty").stream()) == []
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_conftest_fakes.py -v`
 Expected: `AttributeError: '_FakeCollection' object has no attribute 'stream'`
 
-- [ ] **Step 3: Add `.stream()` to `_FakeCollection`**
+- [x] **Step 3: Add `.stream()` to `_FakeCollection`**
 
 In `tests/conftest.py`, add a method to the existing `_FakeCollection` class (alongside `.document()` and `.where()`):
 
@@ -69,17 +69,17 @@ In `tests/conftest.py`, add a method to the existing `_FakeCollection` class (al
             yield snap
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_conftest_fakes.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: same pass count as before plus 2 new tests — nothing else uses this method yet, so no other behavior changes.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tests/conftest.py tests/test_conftest_fakes.py
@@ -98,7 +98,7 @@ git commit -m "FakeFirestoreClient: add stream() on a bare collection"
 - Consumes: `_FakeCollection.stream()` (Task 1).
 - Produces: `estimate_blast_radius(alert: dict[str, Any], firestore_client: Client) -> float` (signature change — gains required `firestore_client`). `BLAST_RADIUS_TABLE_COLLECTION = "blast_radius_table"`. `reset_table_cache()` (test-only reset hook, module-public). Consumed by Task 6 (`orchestrator.py`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_blast_radius.py` (keep every existing test in the file — they'll be updated for the new signature in this same task, not removed):
 
@@ -195,12 +195,12 @@ class TestEstimateBlastRadiusFromFirestore:
 
 Update every EXISTING test in `tests/test_blast_radius.py` that calls `estimate_blast_radius(alert)` to instead call `estimate_blast_radius(alert, fake_firestore)`, seeding `fake_firestore`'s `blast_radius_table` collection with the table entries each test needs (using the same `_seed_entry` helper pattern above) instead of relying on the old module-level `BLAST_RADIUS_TABLE` dict. Add `reset_table_cache()` in each such test's setup so tests don't leak cache state between each other.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_blast_radius.py -v`
 Expected: `TypeError: estimate_blast_radius() missing 1 required positional argument: 'firestore_client'` on every test, plus `ImportError` for `reset_table_cache`/`BLAST_RADIUS_TABLE_COLLECTION`.
 
-- [ ] **Step 3: Rewrite `estimate_blast_radius()` in `vor_agents/blast_radius.py`**
+- [x] **Step 3: Rewrite `estimate_blast_radius()` in `vor_agents/blast_radius.py`**
 
 Add to the imports at the top of the file:
 
@@ -306,17 +306,17 @@ def estimate_blast_radius(alert: dict[str, Any], firestore_client: Client) -> fl
 
 Remove the old module-level `BLAST_RADIUS_TABLE` dict entirely — it's replaced by the Firestore collection. Keep `CRITICAL`/`HIGH`/`MEDIUM`/`LOW`/`UNSCORED_DEFAULT`/`TIER_RANGES` as-is (unchanged by this task).
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_blast_radius.py -v`
 Expected: all tests PASS, including the 6 new ones and every updated existing one.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: failures ONLY in `tests/test_orchestrator.py` (still calling the old `estimate_blast_radius(instance)` one-arg form) — confirm that's the only failure category, fixed in Task 6. Run `.venv/bin/python -m ruff check . && .venv/bin/python -m mypy vor_agents/ main.py` — clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/blast_radius.py tests/test_blast_radius.py
@@ -334,7 +334,7 @@ git commit -m "estimate_blast_radius(): read from a TTL-cached Firestore table"
 **Interfaces:**
 - Produces: `BLAST_RADIUS_PROPOSALS_COLLECTION = "blast_radius_proposals"`. `propose_blast_radius(identity_key, proposed_tier, proposed_score, cited_indicators, rationale, firestore_client) -> dict[str, Any]` (signature change — gains required `firestore_client`; return dict gains `"proposal_id"`, `"identity_key"` is now a `list`, not a `tuple`). `_parse_cited_indicator(indicator: str) -> tuple[str, str]`, `_commit_indicators(cited_indicators: list[str], score: float, firestore_client: Client) -> None`. Consumed by Task 4 (`commit_blast_radius_proposal`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_blast_radius.py`:
 
@@ -424,12 +424,12 @@ class TestProposeBlastRadiusStorage:
 
 Add `import pytest` to the top of `tests/test_blast_radius.py` if it isn't already imported.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_blast_radius.py -k Propose -v`
 Expected: `TypeError: propose_blast_radius() missing 1 required positional argument: 'firestore_client'`.
 
-- [ ] **Step 3: Rewrite `propose_blast_radius()` in `vor_agents/blast_radius.py`**
+- [x] **Step 3: Rewrite `propose_blast_radius()` in `vor_agents/blast_radius.py`**
 
 Add to the imports:
 
@@ -548,17 +548,17 @@ def propose_blast_radius(
     return proposal
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_blast_radius.py -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy vor_agents/ main.py`
 Expected: same pre-existing `test_orchestrator.py` failures as Task 2 left (fixed in Task 6), nothing new.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/blast_radius.py tests/test_blast_radius.py
@@ -576,7 +576,7 @@ git commit -m "propose_blast_radius(): persist proposals, auto-commit CRITICAL/H
 **Interfaces:**
 - Produces: `ProposalNotFoundError(Exception)`, `ProposalAlreadyResolvedError(Exception)`, `commit_blast_radius_proposal(proposal_id: str, firestore_client: Client) -> dict[str, Any]`. Consumed by Task 5 (`main.py`'s new endpoint).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_blast_radius.py`:
 
@@ -639,12 +639,12 @@ class TestCommitBlastRadiusProposal:
             commit_blast_radius_proposal(proposal["proposal_id"], fake_firestore)
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_blast_radius.py -k Commit -v`
 Expected: `ImportError: cannot import name 'commit_blast_radius_proposal'`.
 
-- [ ] **Step 3: Add the function and exceptions**
+- [x] **Step 3: Add the function and exceptions**
 
 Add to `vor_agents/blast_radius.py`:
 
@@ -689,17 +689,17 @@ def commit_blast_radius_proposal(proposal_id: str, firestore_client: Client) -> 
     return data
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_blast_radius.py -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py`
 Expected: same pre-existing `test_orchestrator.py` failures, nothing new; bandit clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/blast_radius.py tests/test_blast_radius.py
@@ -719,7 +719,7 @@ git commit -m "Add commit_blast_radius_proposal() for the human-gated MEDIUM/LOW
 - Consumes: `commit_blast_radius_proposal()`, `ProposalNotFoundError`, `ProposalAlreadyResolvedError` (Task 4).
 - Produces: `BlastRadiusCommitRequest(BaseModel)` with `proposal_id: str`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_main.py`:
 
@@ -755,12 +755,12 @@ def test_blast_radius_commit_returns_409_for_already_resolved_proposal(fake_fire
     assert resp.status_code == 409
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_main.py -k blast_radius -v`
 Expected: 404 (route doesn't exist yet) on all three.
 
-- [ ] **Step 3: Add the schema and endpoint**
+- [x] **Step 3: Add the schema and endpoint**
 
 Add to `vor_agents/schemas.py`, after `AuditRequest`:
 
@@ -808,17 +808,17 @@ async def blast_radius_commit(payload: BlastRadiusCommitRequest) -> dict[str, An
     return proposal
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_main.py -v`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Run the full suite and lint**
+- [x] **Step 5: Run the full suite and lint**
 
 Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py`
 Expected: same pre-existing `test_orchestrator.py` failures, nothing new.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add vor_agents/schemas.py main.py tests/test_main.py
@@ -836,7 +836,7 @@ git commit -m "Add POST /blast-radius/commit endpoint"
 **Interfaces:**
 - Consumes: `estimate_blast_radius(alert, firestore_client)` (Task 2's new signature).
 
-- [ ] **Step 1: Update `_fetch_all_confirmed_patterns()`**
+- [x] **Step 1: Update `_fetch_all_confirmed_patterns()`**
 
 In `vor_agents/orchestrator.py`, change the `blast_radius_estimate` computation inside `_fetch_all_confirmed_patterns()`:
 
@@ -848,21 +848,21 @@ In `vor_agents/orchestrator.py`, change the `blast_radius_estimate` computation 
 
 (was `estimate_blast_radius(instance)`, no `firestore_client` arg — this is the only call site in `vor_agents/` outside `blast_radius.py` itself and its own tests.)
 
-- [ ] **Step 2: Update `tests/test_orchestrator.py`**
+- [x] **Step 2: Update `tests/test_orchestrator.py`**
 
 Any test in this file that seeds Firestore data feeding `_fetch_all_confirmed_patterns()`/`run_scheduled_sweep()` and expects a specific `blast_radius_estimate` value now needs the test's `fake_firestore` to have a matching `blast_radius_table` entry seeded (Task 2's fake collection), or it will see every instance fall back to `UNSCORED_DEFAULT` (0.75) since the table starts empty in a fresh `fake_firestore`. Check each such test's assertions against `UNSCORED_DEFAULT` if it doesn't seed the table — that's the correct new default now that there's no hardcoded dict, not a bug to work around.
 
-- [ ] **Step 3: Run the full suite**
+- [x] **Step 3: Run the full suite**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: **zero failures** — this was the last call site with the old one-arg signature.
 
-- [ ] **Step 4: Lint**
+- [x] **Step 4: Lint**
 
 Run: `.venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py`
 Expected: all clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add vor_agents/orchestrator.py tests/test_orchestrator.py
@@ -879,7 +879,7 @@ git commit -m "Pass firestore_client through to estimate_blast_radius() in the s
 **Interfaces:**
 - Consumes: `_commit_indicators()` (Task 3, module-private — imported directly since this script lives in the same repo, not a separate package boundary).
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 Create `scripts/seed_blast_radius_table.py`:
 
@@ -926,17 +926,17 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Verify it imports cleanly**
+- [x] **Step 2: Verify it imports cleanly**
 
 Run: `.venv/bin/python -c "import ast; ast.parse(open('scripts/seed_blast_radius_table.py').read())"`
 Expected: no output (valid syntax) — not run against real Firestore here, since that needs live credentials this environment doesn't have.
 
-- [ ] **Step 3: Lint**
+- [x] **Step 3: Lint**
 
 Run: `.venv/bin/python -m ruff check scripts/ && .venv/bin/python -m black --check scripts/`
 Expected: clean. If `ruff`/`black`'s config excludes `scripts/` by default, add it to `testpaths`-adjacent config the same way `vor_agents/`/`main.py` are covered — check `pyproject.toml`'s `[tool.ruff]`/`[tool.black]` sections (if present) for an `include`/exclude that needs `scripts/` added.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts/seed_blast_radius_table.py
@@ -954,7 +954,7 @@ git commit -m "Add one-time seed script for blast_radius_table's original 5 entr
 **Interfaces:**
 - None (documentation only).
 
-- [ ] **Step 1: Add a DEPLOY.md section**
+- [x] **Step 1: Add a DEPLOY.md section**
 
 Insert after the existing "3b. needs_attention collection" section (or after 3a if that one doesn't exist yet in this repo's current state):
 
@@ -979,7 +979,7 @@ identities (or a shared review service account) should be allowed to
 commit blast-radius proposals.
 ```
 
-- [ ] **Step 2: Add a storage note to `BLAST_RADIUS_PLAYBOOK.md`**
+- [x] **Step 2: Add a storage note to `BLAST_RADIUS_PLAYBOOK.md`**
 
 Add after the "Proposing a new table entry" section:
 
@@ -997,7 +997,7 @@ that endpoint, not in "who can open a pull request" — keep the reviewer
 list for that IAM binding at least as tight as code-review access was.
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/DEPLOY.md docs/BLAST_RADIUS_PLAYBOOK.md
@@ -1008,7 +1008,7 @@ git commit -m "Document blast-radius table seeding and Firestore storage model"
 
 ## Final verification
 
-- [ ] Run `.venv/bin/python -m pytest -v` — full suite passes.
-- [ ] Run `.venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py` — all clean.
-- [ ] Confirm `git log --oneline -8` shows one commit per task.
-- [ ] Update `docs/TODO-Aug24.md` Task 7 checkbox to done, referencing the commits.
+- [x] Run `.venv/bin/python -m pytest -v` — full suite passes.
+- [x] Run `.venv/bin/python -m ruff check . && .venv/bin/python -m black --check . && .venv/bin/python -m mypy vor_agents/ main.py && .venv/bin/python -m bandit -r vor_agents/ main.py` — all clean.
+- [x] Confirm `git log --oneline -8` shows one commit per task.
+- [x] Update `docs/TODO-Aug24.md` Task 7 checkbox to done, referencing the commits.
