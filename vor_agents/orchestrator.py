@@ -85,16 +85,38 @@ async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[st
         async for event in runner.run_async(
             user_id="vor-system", session_id=session_id, new_message=msg
         ):
-            if event.content and event.content.parts:
-                for part in event.content.parts:
-                    # getattr (not direct attribute access) so mypy sees an
-                    # Any here rather than the declared str | None on
-                    # part.text — the truthiness check already guarantees
-                    # non-None/non-empty, but mypy can't narrow a separate
-                    # attribute access through that guard.
-                    text = getattr(part, "text", None)
-                    if text:
-                        result_text += text
+            # Streaming chunks, when a RunConfig enables them, are ALSO
+            # re-delivered in the aggregated non-partial event that
+            # follows. Accumulating both would concatenate the JSON to
+            # itself and fail to parse. Default RunConfig doesn't stream,
+            # so this guards the seam rather than today's behavior.
+            if event.partial:
+                continue
+            if not (event.content and event.content.parts):
+                continue
+            for part in event.content.parts:
+                # Thought summaries arrive as ordinary text parts flagged
+                # thought=True. They're prose reasoning, not the
+                # structured output, so concatenating them produces
+                # unparseable JSON — degrading EVERY classification to
+                # UNCERTAIN and marking EVERY audit failed, a silent total
+                # loss of autonomous suppression that looks like caution.
+                # ADK strips thoughts from outbound requests but not from
+                # the response stream, so filtering is the caller's job.
+                # Not reachable on gemini-2.0-flash today, but
+                # build_classifier_agent()'s own docstring points at
+                # escalating to a Pro model, and thinking models emit
+                # these.
+                if getattr(part, "thought", None):
+                    continue
+                # getattr (not direct attribute access) so mypy sees an
+                # Any here rather than the declared str | None on
+                # part.text — the truthiness check already guarantees
+                # non-None/non-empty, but mypy can't narrow a separate
+                # attribute access through that guard.
+                text = getattr(part, "text", None)
+                if text:
+                    result_text += text
     except ValidationError as exc:
         # Both agents set output_schema, so ADK validates the model's
         # response against it INSIDE the runner and raises pydantic's

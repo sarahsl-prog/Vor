@@ -74,6 +74,31 @@ class TestResponseParsing:
         result = await _run_with([Part(text=encoded[:25]), Part(text=encoded[25:])], "s-split")
         assert result == VALID_OUTPUT
 
+    async def test_thought_parts_are_ignored(self):
+        """REGRESSION: thought summaries arrive as ordinary text parts
+        flagged thought=True. Concatenating them made the payload
+        unparseable, which degraded every classification to UNCERTAIN and
+        marked every audit failed -- a total, silent loss of autonomous
+        suppression that reads as conservative behavior. Not reachable on
+        gemini-2.0-flash, but build_classifier_agent() documents
+        escalating to a Pro model, and thinking models emit these."""
+        result = await _run_with(
+            [
+                Part(text="First I will consider the parent process.", thought=True),
+                Part(text="Then the integrity level.", thought=True),
+                Part(text=json.dumps(VALID_OUTPUT)),
+            ],
+            "s-thought",
+        )
+        assert result == VALID_OUTPUT
+
+    async def test_thought_only_response_is_an_output_error(self):
+        """A response that is nothing but reasoning carries no decision.
+        Failing loudly is right -- classify_alert() turns this into
+        UNCERTAIN rather than inventing an answer."""
+        with pytest.raises(AgentOutputError):
+            await _run_with([Part(text="Thinking...", thought=True)], "s-thought-only")
+
     async def test_empty_response_is_an_output_error(self):
         with pytest.raises(AgentOutputError, match="length=0"):
             await _run_with([Part(text="")], "s-empty")
