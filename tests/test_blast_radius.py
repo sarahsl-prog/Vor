@@ -6,6 +6,7 @@ safety net, and the MEDIUM/LOW human-review gate.
 import pytest
 
 from vor_agents.blast_radius import (
+    BLAST_RADIUS_TABLE_COLLECTION,
     CRITICAL,
     HIGH,
     LOW,
@@ -13,34 +14,130 @@ from vor_agents.blast_radius import (
     UNSCORED_DEFAULT,
     estimate_blast_radius,
     propose_blast_radius,
+    reset_table_cache,
 )
 
 
 class TestEstimateBlastRadius:
-    def test_known_critical_indicator(self):
+    def setup_method(self):
+        reset_table_cache()
+
+    def _seed_entry(self, fake_firestore, indicator_type, value, score):
+        fake_firestore.collection(BLAST_RADIUS_TABLE_COLLECTION).document(
+            f"{indicator_type}:{value}"
+        ).set({"indicator_type": indicator_type, "value": value, "score": score})
+
+    def test_known_critical_indicator(self, fake_firestore):
+        self._seed_entry(fake_firestore, "parent_image", "lsass.exe", CRITICAL)
         alert = {"parent_image": "lsass.exe"}
-        assert estimate_blast_radius(alert) == CRITICAL
+        assert estimate_blast_radius(alert, fake_firestore) == CRITICAL
 
-    def test_known_high_indicator(self):
+    def test_known_high_indicator(self, fake_firestore):
+        self._seed_entry(fake_firestore, "parent_image", "w3wp.exe", HIGH)
         alert = {"parent_image": "w3wp.exe"}
-        assert estimate_blast_radius(alert) == HIGH
+        assert estimate_blast_radius(alert, fake_firestore) == HIGH
 
-    def test_unmatched_alert_gets_unscored_default_not_low(self):
+    def test_unmatched_alert_gets_unscored_default_not_low(self, fake_firestore):
         """The whole point of UNSCORED_DEFAULT: an unassessed pattern
         must never be silently treated as safe. Explicitly asserting it's
         HIGH, not LOW and not zero."""
+        self._seed_entry(fake_firestore, "parent_image", "lsass.exe", CRITICAL)
         alert = {"parent_image": "totally_unknown_process.exe"}
-        result = estimate_blast_radius(alert)
+        result = estimate_blast_radius(alert, fake_firestore)
         assert result == UNSCORED_DEFAULT
         assert result == HIGH
         assert result != LOW
         assert result != 0.0
 
-    def test_multiple_matches_take_the_max(self):
+    def test_multiple_matches_take_the_max(self, fake_firestore):
         """Worst-case-wins: if an alert matches both a HIGH indicator and
         a CRITICAL one, CRITICAL should win, not an average."""
+        self._seed_entry(fake_firestore, "parent_image", "lsass.exe", CRITICAL)
+        self._seed_entry(fake_firestore, "endpoint_family", "ToolPane_admin", CRITICAL)
         alert = {"parent_image": "lsass.exe", "endpoint_family": "ToolPane_admin"}
-        assert estimate_blast_radius(alert) == CRITICAL
+        assert estimate_blast_radius(alert, fake_firestore) == CRITICAL
+
+
+class TestEstimateBlastRadiusFromFirestore:
+    def setup_method(self):
+        reset_table_cache()
+
+    def _seed_entry(self, fake_firestore, indicator_type, value, score):
+        fake_firestore.collection(BLAST_RADIUS_TABLE_COLLECTION).document(
+            f"{indicator_type}:{value}"
+        ).set({"indicator_type": indicator_type, "value": value, "score": score})
+
+    def test_matches_seeded_entry(self, fake_firestore):
+        self._seed_entry(fake_firestore, "parent_image", "lsass.exe", 0.95)
+
+        result = estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)
+
+        assert result == 0.95
+
+    def test_no_match_falls_back_to_unscored_default(self, fake_firestore):
+        self._seed_entry(fake_firestore, "parent_image", "lsass.exe", 0.95)
+
+        result = estimate_blast_radius({"parent_image": "notepad.exe"}, fake_firestore)
+
+        assert result == UNSCORED_DEFAULT
+
+    def test_worst_case_wins_on_multiple_matches(self, fake_firestore):
+        self._seed_entry(fake_firestore, "parent_image", "w3wp.exe", 0.75)
+        self._seed_entry(fake_firestore, "endpoint_family", "ToolPane_admin", 0.95)
+
+        result = estimate_blast_radius(
+            {"parent_image": "w3wp.exe", "endpoint_family": "ToolPane_admin"}, fake_firestore
+        )
+
+        assert result == 0.95
+
+    def test_cache_serves_repeated_calls_without_rereading(self, fake_firestore):
+        self._seed_entry(fake_firestore, "parent_image", "lsass.exe", 0.95)
+        estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)
+
+        # Mutate the underlying store directly (bypassing the table's own
+        # write path) -- if the cache is honored, this change is invisible
+        # until the cache expires/is invalidated.
+        fake_firestore.collection(BLAST_RADIUS_TABLE_COLLECTION).document(
+            "parent_image:lsass.exe"
+        ).set({"indicator_type": "parent_image", "value": "lsass.exe", "score": 0.10})
+
+        result = estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)
+
+        assert result == 0.95  # still the cached value, not the mutated one
+
+    def test_stale_cache_served_on_refresh_failure(self, fake_firestore, monkeypatch):
+        self._seed_entry(fake_firestore, "parent_image", "lsass.exe", 0.95)
+        estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)  # populates cache
+
+        monkeypatch.setattr("vor_agents.blast_radius._TABLE_CACHE_TTL_SECONDS", 0)
+
+        class _BoomCollection:
+            def stream(self):
+                raise RuntimeError("Firestore unavailable")
+
+        class _BoomClient:
+            def collection(self, name):
+                return _BoomCollection()
+
+        result = estimate_blast_radius({"parent_image": "lsass.exe"}, _BoomClient())
+
+        assert result == 0.95  # stale cache, not a raised exception
+
+    def test_cold_cache_failure_falls_back_to_unscored_default(self):
+        reset_table_cache()
+
+        class _BoomCollection:
+            def stream(self):
+                raise RuntimeError("Firestore unavailable")
+
+        class _BoomClient:
+            def collection(self, name):
+                return _BoomCollection()
+
+        result = estimate_blast_radius({"parent_image": "lsass.exe"}, _BoomClient())
+
+        assert result == UNSCORED_DEFAULT
 
 
 class TestProposeBlastRadius:
@@ -79,20 +176,14 @@ class TestProposeBlastRadius:
         )
         assert proposal["requires_review"] is True
 
-    def test_proposal_never_writes_to_the_table(self):
-        """A proposal must be inert — it returns a dict, it does not
-        mutate BLAST_RADIUS_TABLE. Verify the table is unaffected."""
-        from vor_agents.blast_radius import BLAST_RADIUS_TABLE
-
-        before = dict(BLAST_RADIUS_TABLE)
-        propose_blast_radius(
-            identity_key=("rule", "brand_new_process.exe", "child.exe", "family"),
-            proposed_tier="LOW",
-            proposed_score=LOW,
-            cited_indicators=["test"],
-            rationale="test",
-        )
-        assert BLAST_RADIUS_TABLE == before
+    # test_proposal_never_writes_to_the_table removed here: it asserted
+    # against the module-level BLAST_RADIUS_TABLE dict, which Task 2 of
+    # docs/superpowers/plans/2026-08-24-blast-radius-firestore.md removes
+    # entirely (replaced by the Firestore-backed table). Its intent --
+    # proposing doesn't silently commit -- is re-covered, more precisely,
+    # by Task 3's TestProposeBlastRadiusStorage
+    # .test_medium/low_proposal_does_not_auto_commit, which assert via
+    # estimate_blast_radius() against the real fake_firestore table.
 
     def test_unknown_tier_rejected(self):
         """Regression coverage: an unknown proposed_tier used to fall

@@ -582,7 +582,7 @@ def _fetch_all_confirmed_patterns(firestore_client: Client) -> list[dict[str, An
                 # different privilege contexts), and blast radius is
                 # deliberately a worst-case estimate throughout this design.
                 "blast_radius_estimate": max(
-                    estimate_blast_radius(instance) for instance in instances
+                    estimate_blast_radius(instance, firestore_client) for instance in instances
                 ),
             }
         )

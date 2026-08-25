@@ -13,7 +13,11 @@ something HIGH/CRITICAL is the conservative move and can happen freely;
 scoring it MEDIUM/LOW requires a human to actually commit it.
 """
 
+import time
 from typing import Any
+
+from google.cloud.firestore import Client
+from loguru import logger
 
 CRITICAL = 0.95
 HIGH = 0.75
@@ -33,37 +37,98 @@ TIER_RANGES: dict[str, tuple[float, float]] = {
     "LOW": (0.0, 0.29),
 }
 
-# Keyed by (indicator_type, value) -> score. indicator_type matches a field
-# name that may appear on an alert dict: "parent_image", "endpoint_family",
-# or similar structural indicators — not full identity keys, since the same
-# indicator (e.g. a given parent process) should carry consistent risk
-# across every pattern it appears in, not be re-scored per pattern.
-BLAST_RADIUS_TABLE: dict[tuple[str, str], float] = {
-    ("parent_image", "lsass.exe"): CRITICAL,
-    ("endpoint_family", "ToolPane_admin"): CRITICAL,  # CVE-2026-56164 model
-    ("parent_image", "w3wp.exe"): HIGH,
-    ("parent_image", "svchost.exe"): MEDIUM,
-    ("parent_image", "explorer.exe"): LOW,
-    # New entries: follow BLAST_RADIUS_PLAYBOOK.md. CRITICAL/HIGH may be
-    # added directly. MEDIUM/LOW must go through propose_blast_radius()
-    # and a human review — never write those tiers here without one.
-}
+BLAST_RADIUS_TABLE_COLLECTION = "blast_radius_table"
+
+_TABLE_CACHE: dict[tuple[str, str], float] = {}
+_TABLE_CACHE_LOADED_AT: float | None = None
+_TABLE_CACHE_TTL_SECONDS = 300
+# Per-process, TTL'd cache -- _fetch_all_confirmed_patterns() calls
+# estimate_blast_radius() once per confirmed instance per sweep; a
+# Firestore read per call would turn one sweep into O(instances) reads
+# for a table that changes rarely. 5 minutes is an unvalidated starting
+# point, same posture as GRADUATION_THRESHOLD elsewhere in this design.
 
 
-def estimate_blast_radius(alert: dict[str, Any]) -> float:
+def reset_table_cache() -> None:
+    """Test-only reset hook -- module-level cache state persists across
+    tests in the same process otherwise. Not called anywhere in
+    production code."""
+    global _TABLE_CACHE, _TABLE_CACHE_LOADED_AT
+    _TABLE_CACHE = {}
+    _TABLE_CACHE_LOADED_AT = None
+
+
+def _invalidate_table_cache() -> None:
+    """Called after a commit writes new entries, so the next read sees
+    them without waiting out the full TTL."""
+    global _TABLE_CACHE_LOADED_AT
+    _TABLE_CACHE_LOADED_AT = None
+
+
+def _load_table(firestore_client: Client) -> dict[tuple[str, str], float]:
     """
-    Checks every indicator present on the alert against
-    BLAST_RADIUS_TABLE, returns the MAX matching score — blast radius is
-    a worst-case estimate, not an average, so if an alert matches both a
-    MEDIUM indicator and a CRITICAL one, CRITICAL wins.
-
-    Falls back to UNSCORED_DEFAULT (HIGH, deliberately not LOW or zero)
-    when nothing matches, so an unassessed pattern gets prioritized for
-    audit attention rather than silently trusted by omission.
+    Returns the cached (indicator_type, value) -> score table, refreshing
+    from Firestore if the cache is missing or past its TTL. On a refresh
+    failure: serves the previous cache if one exists (a stale table is a
+    much safer failure mode than an unhandled exception breaking
+    estimate_blast_radius() and, transitively, the whole sweep); falls
+    back to an empty table (every lookup then returns UNSCORED_DEFAULT,
+    same "unassessed defaults to HIGH, never silently trusted" principle
+    this whole module already runs on) if the cache has never been
+    populated at all.
     """
+    global _TABLE_CACHE, _TABLE_CACHE_LOADED_AT
+    now = time.monotonic()
+    if (
+        _TABLE_CACHE_LOADED_AT is not None
+        and (now - _TABLE_CACHE_LOADED_AT) < _TABLE_CACHE_TTL_SECONDS
+    ):
+        return _TABLE_CACHE
+
+    try:
+        fresh: dict[tuple[str, str], float] = {}
+        for doc in firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).stream():
+            data = doc.to_dict() or {}
+            indicator_type = data.get("indicator_type")
+            value = data.get("value")
+            score = data.get("score")
+            if indicator_type is None or value is None or score is None:
+                logger.bind(doc_id=doc.id).warning(
+                    "blast_radius_table doc missing indicator_type/value/score, skipping"
+                )
+                continue
+            fresh[(indicator_type, value)] = score
+        _TABLE_CACHE = fresh
+        _TABLE_CACHE_LOADED_AT = now
+        return _TABLE_CACHE
+    except Exception as exc:  # noqa: BLE001 — deliberate catch-all: any
+        # Firestore failure here degrades to stale-or-empty, never raises.
+        if _TABLE_CACHE_LOADED_AT is not None:
+            logger.bind(error=str(exc)).warning(
+                "Failed to refresh blast_radius_table cache, serving stale cache"
+            )
+            return _TABLE_CACHE
+        logger.bind(error=str(exc)).warning(
+            "Failed to load blast_radius_table cache and no prior cache exists; "
+            "every lookup will fall back to UNSCORED_DEFAULT"
+        )
+        return {}
+
+
+def estimate_blast_radius(alert: dict[str, Any], firestore_client: Client) -> float:
+    """
+    Checks every indicator present on the alert against the cached
+    blast_radius_table (Firestore-backed, see _load_table), returns the
+    MAX matching score -- blast radius is a worst-case estimate, not an
+    average. Falls back to UNSCORED_DEFAULT (HIGH, deliberately not LOW
+    or zero) when nothing matches or the table is unavailable, so an
+    unassessed pattern gets prioritized for audit attention rather than
+    silently trusted by omission.
+    """
+    table = _load_table(firestore_client)
     matches = [
         score
-        for (indicator_type, value), score in BLAST_RADIUS_TABLE.items()
+        for (indicator_type, value), score in table.items()
         if alert.get(indicator_type) == value
     ]
     return max(matches) if matches else UNSCORED_DEFAULT
