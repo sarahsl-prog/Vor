@@ -382,7 +382,7 @@ def _pubsub_envelope(alert: dict) -> dict:
     }
 
 
-def test_classify_accepts_pubsub_envelope(fake_firestore, monkeypatch):
+def test_classify_accepts_pubsub_envelope(fake_firestore, fake_tasks_client, monkeypatch):
     identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
     alert = {
         "detection_rule_id": "rule",
@@ -393,6 +393,7 @@ def test_classify_accepts_pubsub_envelope(fake_firestore, monkeypatch):
 
     with (
         patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
         patch(
             "main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))
         ),
@@ -450,7 +451,7 @@ def test_classify_rejects_non_object_raw_body(fake_firestore):
 
 
 def test_classify_raw_alert_with_message_field_not_mistaken_for_envelope(
-    fake_firestore, monkeypatch
+    fake_firestore, fake_tasks_client, monkeypatch
 ):
     """A legitimate raw alert can carry its own top-level `message` field
     (Windows Event Log records commonly do) with a nested `data` key that
@@ -473,6 +474,7 @@ def test_classify_raw_alert_with_message_field_not_mistaken_for_envelope(
 
     with (
         patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
         patch("main.classify_alert", new=_fake_classify_alert),
     ):
         client = TestClient(main.app)
@@ -482,7 +484,7 @@ def test_classify_raw_alert_with_message_field_not_mistaken_for_envelope(
     assert captured_alert["message"] == {"data": "some evtx payload", "level": "info"}
 
 
-def test_classify_still_accepts_raw_alert_body(fake_firestore):
+def test_classify_still_accepts_raw_alert_body(fake_firestore, fake_tasks_client, monkeypatch):
     """Direct/test callers posting raw alert JSON (no Pub/Sub envelope)
     keep working exactly as before this change."""
     identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
@@ -495,6 +497,7 @@ def test_classify_still_accepts_raw_alert_body(fake_firestore):
 
     with (
         patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
         patch(
             "main.classify_alert", new=AsyncMock(return_value=(_suppress_result(), identity_key))
         ),
