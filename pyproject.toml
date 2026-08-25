@@ -30,11 +30,3 @@ exclude = [
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
 skips = ["B101"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "strict"
-testpaths = ["tests"]
-python_files = "test_*.py"
-python_classes = "Test*"
-python_functions = "test_*"
-pythonpath = ["."]

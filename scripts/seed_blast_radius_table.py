@@ -13,6 +13,15 @@ Usage:
     .venv/bin/python scripts/seed_blast_radius_table.py
 """
 
+import sys
+from pathlib import Path
+
+# Running this file directly puts scripts/ on sys.path, not the repo root,
+# so `import vor_agents` would fail for the documented invocation
+# (`python scripts/<name>.py`). Tests import it fine via pytest's
+# pythonpath=".", which is exactly why this was easy to miss.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import os
 
 from google.cloud import firestore
