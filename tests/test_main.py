@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import main
+from vor_agents.blast_radius import ProposalAlreadyResolvedError, ProposalNotFoundError
 from vor_agents.schemas import (
     AuditorAction,
     AuditorOutput,
@@ -503,3 +504,46 @@ def test_classify_still_accepts_raw_alert_body(fake_firestore):
 
     assert resp.status_code == 200
     assert resp.json()["decision"] == "SUPPRESS"
+
+
+def test_blast_radius_commit_commits_a_pending_proposal(fake_firestore):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "main.commit_blast_radius_proposal",
+            return_value={"status": "committed", "proposal_id": "p1"},
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/blast-radius/commit", json={"proposal_id": "p1"})
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "committed"
+
+
+def test_blast_radius_commit_returns_404_for_unknown_proposal(fake_firestore):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "main.commit_blast_radius_proposal",
+            side_effect=ProposalNotFoundError("no such proposal"),
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/blast-radius/commit", json={"proposal_id": "missing"})
+
+    assert resp.status_code == 404
+
+
+def test_blast_radius_commit_returns_409_for_already_resolved_proposal(fake_firestore):
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "main.commit_blast_radius_proposal",
+            side_effect=ProposalAlreadyResolvedError("already committed"),
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post("/blast-radius/commit", json={"proposal_id": "p1"})
+
+    assert resp.status_code == 409

@@ -83,6 +83,13 @@ class AuditRequest(BaseModel):
     pattern_data: dict[str, Any]
 
 
+class BlastRadiusCommitRequest(BaseModel):
+    """Body shape for POST /blast-radius/commit -- a human committing a
+    pending MEDIUM/LOW blast-radius proposal into the live table."""
+
+    proposal_id: str
+
+
 class PubSubMessage(BaseModel):
     """The `message` object inside a Pub/Sub push request body. `data` is
     base64-encoded -- Pub/Sub always encodes the published message body

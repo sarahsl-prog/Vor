@@ -18,6 +18,10 @@ Exposes the trigger paths from the hybrid cadence decision:
   POST /replay-traces — scheduled path, invoked by Cloud Scheduler to
                    drain vor_agents.tracing's pending_traces fallback
                    queue back into MLflow.
+  POST /blast-radius/commit — human-triggered path. Commits a pending
+                   MEDIUM/LOW blast-radius proposal into the live table
+                   (see vor_agents/blast_radius.py's
+                   commit_blast_radius_proposal()).
   GET  /healthz  — Cloud Run health check
 
 See DEPLOY.md for how this actually gets deployed and secured.
@@ -34,9 +38,19 @@ from google.cloud import firestore, tasks_v2
 from loguru import logger
 from pydantic import ValidationError as PydanticValidationError
 
+from vor_agents.blast_radius import (
+    ProposalAlreadyResolvedError,
+    ProposalNotFoundError,
+    commit_blast_radius_proposal,
+)
 from vor_agents.identity import MalformedAlertError
 from vor_agents.orchestrator import audit_pattern, classify_alert, run_scheduled_sweep
-from vor_agents.schemas import AuditRequest, ClassifierRequest, PubSubPushEnvelope
+from vor_agents.schemas import (
+    AuditRequest,
+    BlastRadiusCommitRequest,
+    ClassifierRequest,
+    PubSubPushEnvelope,
+)
 from vor_agents.task_queue import AuditEnqueueError, enqueue_audit
 from vor_agents.tracing import replay_pending_traces
 
@@ -286,6 +300,27 @@ async def audit(payload: AuditRequest) -> dict[str, Any]:
         )
         raise HTTPException(status_code=500, detail="Audit failed, will be retried") from exc
     return decision.model_dump()
+
+
+@app.post("/blast-radius/commit")
+async def blast_radius_commit(payload: BlastRadiusCommitRequest) -> dict[str, Any]:
+    """
+    Human-triggered commit for a pending MEDIUM/LOW blast-radius
+    proposal (see vor_agents/blast_radius.py's
+    commit_blast_radius_proposal()). Gated the same way /audit is --
+    Cloud Run IAM, OIDC-authenticated caller, never
+    --allow-unauthenticated in production -- but unlike /audit this is
+    meant to be called by a human (via `gcloud run services proxy` +
+    curl, or a small authenticated script), not a machine dispatcher.
+    """
+    client = get_firestore_client()
+    try:
+        proposal = commit_blast_radius_proposal(payload.proposal_id, client)
+    except ProposalNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProposalAlreadyResolvedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return proposal
 
 
 @app.post("/replay-traces")
