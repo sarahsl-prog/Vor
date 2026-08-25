@@ -128,6 +128,25 @@ gcloud firestore documents list --collection-ids=needs_attention
 
 Revisit once there's an actual notification channel to wire this into.
 
+## 3c. Seed the blast-radius table and gate the commit endpoint
+
+```bash
+.venv/bin/python scripts/seed_blast_radius_table.py
+```
+
+Run once, before first production deploy — populates `blast_radius_table`
+with the 5 entries that used to be hardcoded. Without this,
+`estimate_blast_radius()` falls back to `UNSCORED_DEFAULT` for every
+alert until someone re-proposes and commits each entry by hand.
+
+`/blast-radius/commit` must never be deployed with
+`--allow-unauthenticated`, same as `/classify`/`/sweep`/`/audit` —
+gate it with the same Cloud Run IAM approach (OIDC-authenticated caller).
+Unlike the others, this endpoint is meant to be called by a human, not a
+machine dispatcher — grant `roles/run.invoker` to whichever human
+identities (or a shared review service account) should be allowed to
+commit blast-radius proposals.
+
 ## 4. Wire /classify to a Pub/Sub push subscription
 
 ```bash
