@@ -147,6 +147,42 @@ machine dispatcher — grant `roles/run.invoker` to whichever human
 identities (or a shared review service account) should be allowed to
 commit blast-radius proposals.
 
+## 3d. Backfill identity_key on pre-existing data
+
+Only needed if the Firestore project already holds confidence docs written
+before the doc-ID scheme changed (`docs/TODO-Aug15.md` Task 3). Those docs
+carry no `identity_key` field, so `_fetch_all_confirmed_patterns()` skips
+them with a warning — they are not lost, but they stop being audited.
+
+```bash
+.venv/bin/python scripts/backfill_identity_key.py --dry-run
+.venv/bin/python scripts/backfill_identity_key.py
+```
+
+Recovers each doc's identity_key from its own `confirmed_instances`, then
+rewrites it under the new hashed doc ID and deletes the legacy one.
+Idempotent — docs that already carry the field are skipped, so a re-run is
+a no-op. Exits non-zero if any doc could not be migrated; the log names
+each one and why. A fresh project needs none of this.
+
+## 3e. Seed confirmed-negative history (optional)
+
+Vör starts knowing nothing: every pattern is NO_HISTORY until evidence
+accumulates, so nothing is autonomously suppressed on day one. To start
+from existing history instead:
+
+```bash
+.venv/bin/python scripts/seed_firestore.py --file history.json --dry-run
+.venv/bin/python scripts/seed_firestore.py --file history.json
+```
+
+`--dry-run` first, always — it reports the tier each batch would land at
+without writing, and a batch that lands `provisional` (too few instances,
+or too uniform) will not autonomously suppress. Everything seeded this way
+is marked provenance `seeded` / `verified_by: bulk`, because no human
+signed off on the instances individually. See `docs/DATASET_RUNBOOK.md`
+for the file format and for seeding synthetic cases instead.
+
 ## 4. Wire /classify to a Pub/Sub push subscription
 
 ```bash
