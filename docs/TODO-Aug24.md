@@ -1,9 +1,14 @@
 # Vör — Gap-analysis To-Do List (docs vs. implementation, 2026-08-24)
 
-**Status:** Compiled by auditing `docs/` planning docs against current `vor_agents/`, `main.py`,
-`tests/`, CI, and `pyproject.toml`. Cloud Tasks audit-queue plan (spec + implementation plan) is
-**fully implemented and verified** — not repeated here. `docs/TODO-Aug15.md`'s 22 tasks are all
-✅ DONE, also verified. Everything below is a real, currently-open gap.
+**Status (updated 2026-08-25):** Compiled by auditing `docs/` planning docs against current
+`vor_agents/`, `main.py`, `tests/`, CI, and `pyproject.toml`. Cloud Tasks audit-queue plan (spec +
+implementation plan) is **fully implemented and verified** — not repeated here.
+`docs/TODO-Aug15.md`'s 22 tasks are all ✅ DONE, also verified.
+
+**18 of 19 tasks are now closed.** Only Task 8 (re-run the Vertex AI billing smoke test) remains
+fully open, and it cannot be closed from a dev environment — it needs a real GCP project with
+billing enabled. Two closed tasks carry a narrower follow-up checkbox (Task 2's conftest fixture
+collapse, Task 9's not-yet-executed real-API run).
 
 Order below = rough priority (production-blocking → nice-to-have), not strict CLAUDE.md fix
 order since these are mostly unrelated features rather than bugs in one flow — pick order per
@@ -27,13 +32,21 @@ outstanding-decisions discussion.
   Ready for a design doc (Task 11) + implementation.
 
 ### Task 2 — Synthetic dataset generation (6 cases)
-- [ ] README "Not yet built." `conftest.py` only has fixtures for case #3 (drift) and case #6
-  (field-level deviation) — the two the reconciliation tests needed. No full generator, no doc
-  enumerating all 6 cases.
+- [x] **Resolved** — `vor_agents/datasets.py` generates all 6 cases deterministically from an
+  explicit seed. Cases #1/#3/#6 keep the numbering already used in the codebase; #2/#4/#5 were
+  never enumerated anywhere and were chosen to complete the decision surface (see
+  `docs/DATASET_RUNBOOK.md`, which records that choice explicitly so it can be corrected).
+  `tests/test_datasets.py` asserts each case against the real graduation/diversity/diffing code
+  rather than hardcoded expectations.
+- [ ] **Still open:** `conftest.py`'s hand-written fixtures for #3 and #6 predate the generator
+  and are maintained separately. They agree today (verified); worth collapsing onto the
+  generator next time either is touched.
 
 ### Task 3 — Seeding script for `enrichment.seed_template()`
-- [ ] Function exists and is exercised in tests, but there's no CLI/script entrypoint to seed a
-  real Firestore instance with historical confirmed patterns.
+- [x] **Resolved** — `scripts/seed_firestore.py` seeds either a synthetic case (`--case`) or
+  real history (`--file`), with `--dry-run` reporting the tier each batch would land at before
+  anything is written. Input is fully validated up front so a malformed record can't leave a
+  half-seeded collection. Documented in `docs/DATASET_RUNBOOK.md` and DEPLOY.md step 3e.
 
 ### Task 4 — MLflow/OTel tracing
 - [x] CLAUDE.md requires "the option to log activities to mlflow or another otel compatible
@@ -57,9 +70,10 @@ outstanding-decisions discussion.
   spec (the replay job is a second moving piece, not just the inline logging call).
 
 ### Task 5 — One-time Firestore backfill script (identity_key migration)
-- [ ] Flagged explicitly in `docs/TODO-Aug15.md` Task 3: "write a one-time backfill script
-  before first production deploy." No script exists. Low urgency — no live Firestore data yet —
-  but must land before first real deploy against pre-existing data.
+- [x] **Resolved** — `scripts/backfill_identity_key.py`. Recovers each legacy doc's identity_key
+  from its own `confirmed_instances` (never by splitting the ambiguous legacy doc ID), rewrites
+  it under the hashed doc ID, and deletes the old one. Idempotent, `--dry-run` supported, exits
+  non-zero if any doc was unrecoverable. Documented in DEPLOY.md step 3d.
 
 ### Task 6 — Consecutive-audit-failure escalation
 - [x] Outstanding decision #4 from Code-review-Aug15/TODO-Aug15. **Resolved** — see
@@ -99,20 +113,28 @@ outstanding-decisions discussion.
 - [ ] Outstanding decision #3. Smoke test previously blocked on `BILLING_DISABLED` for the
   project, never re-run since. Not a code gap — an unverified claim currently sitting in
   README/DEPLOY.md as "resolved."
+- **Cannot be closed from a dev environment**: needs a real GCP project with billing enabled and
+  Vertex AI credentials. `tests/test_integration_gemini.py` (Task 9) is the mechanism to verify
+  it — run `pytest -m integration` against the billed project and this closes with Task 9's
+  second checkbox.
 
 ### Task 9 — `@pytest.mark.integration` suite against real Gemini
-- [ ] TESTING_PLAN.md commits to this; doesn't exist. Zero coverage today that a real model call
-  round-trips into a valid `ClassifierOutput`/`AuditorOutput` schema.
+- [x] **Resolved** — `tests/test_integration_gemini.py`, marked `integration` and deselected by
+  default via `pytest.ini`'s `addopts = -m "not integration"`, so it never gates CI. Asserts
+  shape (real call round-trips into a valid `ClassifierOutput`/`AuditorOutput`), not model
+  content — making a non-deterministic model a pass/fail gate is exactly what TESTING_PLAN.md's
+  philosophy rejects. Skips cleanly without credentials rather than failing red.
+- [ ] **Not yet actually executed against the real API** — no Vertex AI credentials/billing
+  available in this environment. Pairs with Task 8.
 
 ---
 
 ## Missing docs
 
 ### Task 10 — Add `.env.example`
-- [ ] CLAUDE.md: "All secrets go in `.env` (never committed)" — no template listing the vars a
-  fresh clone needs: `GCP_PROJECT`, `TASKS_LOCATION`, `TASKS_QUEUE`, `TASKS_OIDC_SA_EMAIL`,
-  `SERVICE_URL`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`.
-  Currently scattered across DEPLOY.md's gcloud commands only.
+- [x] **Resolved** — `.env.example` lists every variable with placeholder values and notes what
+  breaks when each is missing. Required a `!.env.example` negation in `.gitignore`, whose
+  `.env.*` rule was silently ignoring it.
 
 ### Task 11 — Trigger-source design doc (pairs with Task 1)
 - [x] **Resolved** — see `docs/superpowers/specs/2026-08-24-pubsub-classify-trigger-design.md`
@@ -122,8 +144,9 @@ outstanding-decisions discussion.
   ingest source needs.
 
 ### Task 12 — Dataset/seeding runbook (pairs with Tasks 2–3)
-- [ ] No doc enumerates what all 6 synthetic cases actually are — only cases #3 and #6 are named
-  anywhere (TESTING_PLAN.md).
+- [x] **Resolved** — `docs/DATASET_RUNBOOK.md` enumerates all 6 cases, explains why they are
+  those six (they span the decision surface, read as three pairs), and documents both seeding
+  paths. Flags explicitly which case numbers were pre-existing and which were newly chosen.
 
 ### Task 13 — MLflow/OTel integration doc (pairs with Task 4)
 - [x] **Resolved** — landed alongside Task 4, not as an afterthought. See
@@ -132,29 +155,32 @@ outstanding-decisions discussion.
   the still-open unbounded-growth caveat during an extended MLflow outage).
 
 ### Task 14 — Fix stale "Known gaps" section header in README
-- [ ] Cosmetic: section is titled "not yet resolved" but its one item (identity-key round-trip)
-  is marked fixed inline. Misleading on skim.
+- [x] **Resolved** — retitled "Known gaps", with the resolved half and the still-open half
+  (pre-existing data needing the backfill) called out separately instead of buried in a
+  parenthetical.
 
 ---
 
 ## Testing gaps
 
 ### Task 15 — Agent-construction smoke test
-- [ ] TESTING_PLAN.md names this as deliberately not-yet-covered ("worth a smoke test that they
-  construct without error"). Confirmed absent from `tests/`.
+- [x] **Resolved** — `tests/test_agents.py` covers construction, output schema/key, the model
+  override seam, that neither agent carries tools (the design boundary auditability rests on),
+  and that neither system prompt is empty.
 
 ### Task 16 — `/classify` non-enqueue on ESCALATE/UNCERTAIN
-- [ ] Code-review-Aug15's Test Gaps table lists `test_classify_no_enqueue_on_non_suppress` — not
-  present in current `test_main.py` (only SUPPRESS-path enqueue tests exist).
+- [x] **Resolved** — `test_classify_no_enqueue_on_non_suppress` in `tests/test_main.py`, covering
+  both UNCERTAIN and ESCALATE.
 
 ### Task 17 — Enqueued task body shape
-- [ ] Same table: `test_enqueued_task_body_shape` (assert actual `Task` payload — URL, OIDC
-  audience, identity_key list). `test_task_queue.py` covers dedup/naming/error-wrapping but not
-  payload contents.
+- [x] **Resolved** — `test_enqueued_task_body_shape` asserts URL, HTTP method, headers, OIDC
+  service account and audience, and the JSON body; a companion test round-trips that body back
+  through `AuditRequest` so drift between `task_queue.py` and the model fails here rather than
+  after deploy.
 
 ### Task 18 — Integration suite (repeats Task 9, testing-specific framing)
-- [ ] Same gap as Task 9 — listed here too since it's also a named row in TESTING_PLAN.md's
-  coverage map, not just a "features" gap.
+- [x] **Resolved** with Task 9. TESTING_PLAN.md's coverage map now has a row for it, plus rows
+  for `datasets.py`, both agents, and both scripts.
 
 ### Task 19 — Consecutive-failure-escalation tests
 - [x] **Resolved** — unblocked by Task 6 landing. `tests/test_review_flag.py`
@@ -171,5 +197,7 @@ outstanding-decisions discussion.
   doc and implementation plan exactly. `/classify`, `/sweep`, `/audit` all present and tested.
 - `docs/TODO-Aug15.md`'s 22 tasks: all ✅ DONE, spot-checked against source (mypy --strict clean,
   pre-commit config present, requirements pinned, etc).
-- `pytest.ini` and `pyproject.toml`'s `[tool.pytest.ini_options]` are duplicate config (not a
-  functional gap — pytest.ini wins — but worth deduplicating next time either file is touched).
+- `pytest.ini` and `pyproject.toml`'s `[tool.pytest.ini_options]` were duplicate config — now
+  deduplicated. `pytest.ini` is the single source (it won anyway); the dead `pyproject.toml`
+  block was removed while adding the `integration` marker, per this note's own instruction to
+  do it next time either file was touched.
