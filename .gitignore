@@ -13,6 +13,9 @@ env/
 # Credentials — never commit these, ever
 .env
 .env.*
+# ...but the template of variable NAMES is meant to be committed. It holds
+# placeholders only, never real values.
+!.env.example
 *service-account*.json
 *credentials*.json
 gcp-key*.json
