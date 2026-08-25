@@ -9,12 +9,14 @@ import json as _json
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from google.cloud.tasks_v2 import HttpMethod
 
 import main
 from vor_agents.blast_radius import ProposalAlreadyResolvedError, ProposalNotFoundError
 from vor_agents.schemas import (
     AuditorAction,
     AuditorOutput,
+    AuditRequest,
     ClassifierOutput,
     Decision,
     UncertainReason,
@@ -550,3 +552,110 @@ def test_blast_radius_commit_returns_409_for_already_resolved_proposal(fake_fire
         resp = client.post("/blast-radius/commit", json={"proposal_id": "p1"})
 
     assert resp.status_code == 409
+
+
+def _uncertain_result():
+    return ClassifierOutput(
+        decision=Decision.UNCERTAIN,
+        matched_pattern_id="test",
+        uncertain_reason=UncertainReason.NO_HISTORY,
+        structural_deviations_found=[],
+        reasoning="no history for this pattern",
+    )
+
+
+def _escalate_result():
+    return ClassifierOutput(
+        decision=Decision.ESCALATE,
+        matched_pattern_id="test",
+        uncertain_reason=UncertainReason.NOT_APPLICABLE,
+        structural_deviations_found=["integrity_level"],
+        reasoning="structural deviation found",
+    )
+
+
+def _classify_with(result, fake_firestore, fake_tasks_client, monkeypatch):
+    for key, value in TASK_ENV.items():
+        monkeypatch.setenv(key, value)
+    identity_key = ("rule", "w3wp.exe", "csc.exe", "family")
+
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch("main.get_tasks_client", return_value=fake_tasks_client),
+        patch("main.classify_alert", new=AsyncMock(return_value=(result, identity_key))),
+    ):
+        client = TestClient(main.app)
+        return client.post("/classify", json=_full_alert())
+
+
+def test_classify_no_enqueue_on_non_suppress(fake_firestore, fake_tasks_client, monkeypatch):
+    """The audit queue exists to re-verify patterns Vör suppressed
+    AUTONOMOUSLY -- a SUPPRESS is the trigger condition the auditor was
+    designed around (see main.py's module docstring). UNCERTAIN and
+    ESCALATE both already put a human in the loop, so enqueueing an audit
+    for them would burn model spend re-checking a decision nobody acted
+    on unreviewed.
+
+    Named in docs/Code-review-Aug15.md's Test Gaps table; only the
+    SUPPRESS-path enqueue was covered before this.
+    """
+    for result in (_uncertain_result(), _escalate_result()):
+        resp = _classify_with(result, fake_firestore, fake_tasks_client, monkeypatch)
+        assert resp.status_code == 200
+
+    assert fake_tasks_client.created_tasks == {}
+
+
+def test_enqueued_task_body_shape(fake_firestore, fake_tasks_client, monkeypatch):
+    """Asserts the actual Task the Cloud Tasks client receives, not just
+    that one was created: the callback URL, the OIDC service account and
+    audience, and the JSON body /audit will have to parse back out.
+
+    This is the contract between _enqueue() and the /audit endpoint, and
+    it is only ever exercised for real in production -- a silent change
+    to the payload shape (a renamed key, a tuple where /audit expects a
+    list) would otherwise surface as audits failing after deploy, not as
+    a failing test. Named in docs/Code-review-Aug15.md's Test Gaps table.
+    """
+    resp = _classify_with(_suppress_result(), fake_firestore, fake_tasks_client, monkeypatch)
+    assert resp.status_code == 200
+
+    (task,) = fake_tasks_client.created_tasks.values()
+
+    assert task.name.startswith(
+        "projects/test-project/locations/us-central1/queues/vor-audit-queue/tasks/audit-"
+    )
+
+    http_request = task.http_request
+    assert http_request.url == "https://vor-test.a.run.app/audit"
+    assert http_request.http_method == HttpMethod.POST
+    assert http_request.headers["Content-Type"] == "application/json"
+
+    assert (
+        http_request.oidc_token.service_account_email
+        == "vor-scheduler@test-project.iam.gserviceaccount.com"
+    )
+    # Audience must be the /audit URL itself -- an OIDC token minted for
+    # any other audience is rejected by Cloud Run's IAM check.
+    assert http_request.oidc_token.audience == "https://vor-test.a.run.app/audit"
+
+    body = _json.loads(http_request.body.decode())
+    # A JSON array, not a tuple: /audit validates this against
+    # AuditRequest, and tuples do not survive a JSON round-trip.
+    assert body["identity_key"] == ["rule", "w3wp.exe", "csc.exe", "family"]
+    assert body["pattern_data"] == {"triggered_by": "classify_suppress"}
+
+
+def test_enqueued_task_body_parses_back_into_an_audit_request(
+    fake_firestore, fake_tasks_client, monkeypatch
+):
+    """The other half of that contract: the enqueued body is not merely
+    well-shaped, it actually validates against the model /audit parses it
+    with. Catches a drift between task_queue.py and AuditRequest that
+    matching literals by hand would not."""
+    _classify_with(_suppress_result(), fake_firestore, fake_tasks_client, monkeypatch)
+
+    (task,) = fake_tasks_client.created_tasks.values()
+    parsed = AuditRequest.model_validate(_json.loads(task.http_request.body.decode()))
+
+    assert parsed.identity_key == ["rule", "w3wp.exe", "csc.exe", "family"]
