@@ -89,6 +89,16 @@ gcloud run services update vor \
   --set-env-vars "GCP_PROJECT=YOUR_PROJECT_ID,TASKS_LOCATION=us-central1,TASKS_QUEUE=vor-audit-queue,TASKS_OIDC_SA_EMAIL=vor-scheduler@YOUR_PROJECT_ID.iam.gserviceaccount.com,SERVICE_URL=https://YOUR_CLOUD_RUN_URL,GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID,GOOGLE_CLOUD_LOCATION=us-central1"
 ```
 
+Three further variables are optional and omitted above because each has a
+working default — add them to `--set-env-vars` if the default isn't what
+you want:
+
+| Variable | Default if unset | Set it when |
+|---|---|---|
+| `FIRESTORE_DATABASE` | `(default)` | Your data lives in a **named** Firestore database. Nothing errors if this is wrong — the service and every `scripts/` entrypoint just read and write the default database instead. |
+| `GEMINI_MODEL` | `DEFAULT_GEMINI_MODEL` (`vor_agents/model_config.py`) | Pinning or upgrading the model without a code deploy. |
+| `MLFLOW_EXPERIMENT_NAME` | MLflow's `Default` experiment | Always, on a shared tracking server — otherwise dev/staging/prod traces are indistinguishable after the fact. |
+
 `/audit` must never be deployed with `--allow-unauthenticated`, same as
 `/classify` and `/sweep` — it's reached exclusively via Cloud Tasks'
 OIDC-authenticated dispatch.
@@ -235,6 +245,18 @@ gcloud run services update vor \
   --region us-central1 \
   --update-env-vars "MLFLOW_TRACKING_URI=https://YOUR_MLFLOW_SERVER"
 ```
+
+Set `MLFLOW_EXPERIMENT_NAME` alongside it. Without it every run lands in
+MLflow's `Default` experiment, so a tracking server shared across
+environments mixes their traces together irreversibly:
+
+```bash
+gcloud run services update vor \
+  --region us-central1 \
+  --update-env-vars "MLFLOW_EXPERIMENT_NAME=vor-prod"
+```
+
+Both are read by the `mlflow` client itself, not by this repo's code.
 
 If the managed server requires its own auth (API key, service-account
 token), that credential goes in Secret Manager / `.env`, never
