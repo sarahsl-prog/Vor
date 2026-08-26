@@ -5,6 +5,11 @@ of what's live. Run them yourself when ready; none of this should execute
 without you actually reviewing it first, especially the parts that create
 billable resources.
 
+For a one-command, idempotent deploy, see `scripts/deploy.sh` and its
+tear-down companion `scripts/deploy-cleanup.sh`. The sections below still
+show the equivalent manual `gcloud` commands so you can review exactly what
+the script does before running it.
+
 ## 1. Build and deploy the Cloud Run service
 
 ```bash
@@ -242,6 +247,33 @@ for direct/manual calls.
 configured on `vor-alerts-sub` yet -- a permanently-malformed message
 will retry and 422 until it ages out of the subscription's retention
 window. Revisit once real traffic volume exists to calibrate against.
+
+## Scripted deploy / cleanup
+
+```bash
+# Deploy everything described below
+export GCP_PROJECT=your-project-id
+export GCP_REGION=us-central1
+./scripts/deploy.sh
+
+# Tear it down when you are done (does not delete Firestore data)
+./scripts/deploy-cleanup.sh
+```
+
+`deploy.sh` creates/updates the Cloud Run service, the scheduler service
+account, the Cloud Tasks queue, the Cloud Scheduler jobs, the Pub/Sub topic
+and subscription, and the required IAM bindings. It also sets the
+environment variables the service needs. Re-running it is safe.
+
+`deploy-cleanup.sh` deletes the same resources in the reverse order. It
+does **not** delete Firestore collections, since they may contain evidence
+you want to keep; if you want to remove that data too, use the
+`gcloud firestore documents delete-all` command shown in the script's
+summary.
+
+Both scripts require `gcloud` to be authenticated with sufficient
+permissions (Project Owner or equivalent roles to manage Cloud Run,
+Scheduler, Tasks, Pub/Sub, IAM, and service accounts).
 
 ## 5. MLflow tracing
 
