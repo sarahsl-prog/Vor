@@ -7,7 +7,7 @@ auditor_agent.py) with no orchestration logic of its own.
 
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,6 +37,7 @@ from .schemas import (
     AuditorOutput,
     ClassifierOutput,
     Decision,
+    StructuralDeviation,
     UncertainReason,
 )
 from .session_config import build_session_service
@@ -177,28 +178,52 @@ async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[st
         ) from exc
 
 
-def _deviation_field_names(deviations: list[dict[str, Any]]) -> set[str]:
+def _deviation_field_names(
+    deviations: Sequence[StructuralDeviation | dict[str, Any]],
+) -> set[str]:
     """
-    Extracts just the field name from each structured deviation object
-    (format: {"field": ..., "template": ..., "observed": ...} — see
-    diff_alert_against_template() and ClassifierOutput.structural_deviations_found's
-    schema description). Comparing by field name rather than the full
-    object is deliberate: the model is asked to follow this schema but
-    isn't guaranteed to serialize template/observed identically to the
-    Python-computed version (type coercion, formatting) — field name is
-    the part that actually matters for reconciliation.
+    Extracts just the field name from each structured deviation (see
+    StructuralDeviation in schemas.py). Comparing by field name rather
+    than the full object is deliberate: the model is asked to follow this
+    schema but isn't guaranteed to serialize template/observed identically
+    to the Python-computed version (type coercion, formatting) — field
+    name is the part that actually matters for reconciliation.
 
-    A dict missing the "field" key (the model not following its own
-    output schema) is skipped and logged rather than guessed at — same
-    "when in doubt, don't silently corrupt the comparison" posture as
-    every other malformed-model-output handling in this module. This can
-    only make a real deviation look unreported, never the reverse, which
-    is the safe direction to fail in (see the ground-truth reconciliation
-    block below, which treats "unreported" as the dangerous case to catch).
+    Accepts a plain dict too (isinstance-checked), not just
+    StructuralDeviation: diff_alert_against_template() in identity.py is
+    deliberately pydantic-free and still produces plain
+    {"field": ..., "template": ..., "observed": ...} dicts, and this
+    function's own unit tests (TestDeviationFieldNames) also pass
+    hand-built dicts directly.
+
+    The "missing field key" branch below is effectively unreachable via
+    classify_alert()'s real path now that structural_deviations_found is
+    list[StructuralDeviation] with a required `field: str` -- a model
+    response missing "field" now fails ClassifierOutput's own pydantic
+    validation before classify_alert() ever runs, which degrades that
+    call to UNCERTAIN via the existing ValidationError -> AgentOutputError
+    conversion in _run_agent (see run_agent.py), never reaching this
+    function at all. That's a *safer* outcome than before, not a gap: the
+    check that used to live here now lives one layer earlier, enforced by
+    the type system instead of by hand. Kept here anyway as defense in
+    depth for the identity.py (dict) call path, which has no such
+    upstream validation.
     """
-    parsed = set()
+    parsed: set[str] = set()
     for d in deviations:
-        field = d.get("field") if isinstance(d, dict) else None
+        # Annotated Any rather than str: the dict branch's .get() can
+        # return anything at all, and narrowing it here (e.g. dropping a
+        # non-str field name) would shrink precomputed_fields, which is
+        # the UNSAFE direction -- a dropped ground-truth deviation stops
+        # being counted as "missed by the model" and the ESCALATE
+        # override never fires. Falsy values are still skipped below.
+        field: Any
+        if isinstance(d, StructuralDeviation):
+            field = d.field
+        elif isinstance(d, dict):
+            field = d.get("field")
+        else:
+            field = None
         if not field:
             logger.warning("Deviation object missing a 'field' key: {}", d)
             continue
@@ -206,20 +231,34 @@ def _deviation_field_names(deviations: list[dict[str, Any]]) -> set[str]:
     return parsed
 
 
-def _merge_deviations(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_deviations(
+    *groups: Sequence[StructuralDeviation | dict[str, Any]],
+) -> list[StructuralDeviation]:
     """
-    Merges deviation-object lists with de-duplication, replacing the old
-    `sorted(set(a) | set(b))` now that a deviation is a dict (unhashable).
-    Dedup key is the JSON-serialized object (sorted keys) so two
-    structurally-identical deviations from different sources (ground
-    truth vs. model) collapse into one; sorted by that same key for
-    deterministic output ordering, matching the old sorted-set behavior.
+    Merges deviation lists -- StructuralDeviation instances (the model's
+    validated output) or plain dicts (diff_alert_against_template's
+    pydantic-free deterministic path) -- into one deduplicated, sorted
+    list of StructuralDeviation instances. The output MUST already be
+    StructuralDeviation, not a mix: ClassifierOutput.model_copy(update=...)
+    does not re-validate its update dict against the field's declared
+    type, so whatever this function returns becomes the field's actual
+    runtime value verbatim.
+
+    Dedup key is the JSON-serialized, sorted-keys dump of each normalized
+    deviation, so two structurally-identical deviations from different
+    sources (ground truth vs. model) collapse into one; sorted by that
+    same key for deterministic output ordering.
     """
-    seen: dict[str, dict[str, Any]] = {}
+    seen: dict[str, StructuralDeviation] = {}
     for group in groups:
         for deviation in group:
-            key = json.dumps(deviation, sort_keys=True, default=str)
-            seen[key] = deviation
+            normalized = (
+                deviation
+                if isinstance(deviation, StructuralDeviation)
+                else StructuralDeviation.model_validate(deviation)
+            )
+            key = json.dumps(normalized.model_dump(), sort_keys=True, default=str)
+            seen[key] = normalized
     return [seen[key] for key in sorted(seen)]
 
 

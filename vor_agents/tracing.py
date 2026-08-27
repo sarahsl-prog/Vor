@@ -109,7 +109,17 @@ def log_classification_trace(
         "enrichment": enrichment,
         "decision": classifier_output.decision,
         "uncertain_reason": classifier_output.uncertain_reason,
-        "structural_deviations_found": classifier_output.structural_deviations_found,
+        # .model_dump() per item, not the StructuralDeviation objects
+        # themselves: both sinks below need plain JSON-compatible values
+        # (mlflow.log_dict json-serializes; the pending_traces fallback
+        # writes into Firestore, which can't store a pydantic model
+        # either). Passing the models straight through fails BOTH sinks
+        # and the trace is lost to a log line -- see final-review C-1,
+        # which changed this field from list[dict] to
+        # list[StructuralDeviation].
+        "structural_deviations_found": [
+            deviation.model_dump() for deviation in classifier_output.structural_deviations_found
+        ],
         "reasoning": classifier_output.reasoning,
         "overrides_fired": overrides_fired,
     }

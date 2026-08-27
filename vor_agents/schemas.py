@@ -29,6 +29,27 @@ class UncertainReason(str, Enum):
     NOT_APPLICABLE = "not_applicable"
 
 
+class StructuralDeviation(BaseModel):
+    """
+    One field-level mismatch between an alert and its confirmed template.
+    Declared as a submodel, NOT a plain dict -- see
+    docs/Code-review-Aug25.md's remediation final-review, finding C-1:
+    `list[dict[str, Any]]` generates a propertyless OBJECT schema in the
+    Gemini/Vertex structured-output contract (no declared "properties"),
+    which Vertex rejects as invalid and which is semantically
+    indistinguishable from `Any` from the model's side even when accepted.
+    A declared submodel forces the schema to carry real named properties.
+
+    template/observed are `Any`, not `str`, because DIFFABLE_FIELDS values
+    are heterogeneous (bool fields like egress_follows_access, string
+    fields like integrity_level) -- see identity.DIFFABLE_FIELDS.
+    """
+
+    field: str
+    template: Any = None
+    observed: Any = None
+
+
 class ClassifierOutput(BaseModel):
     decision: Decision
     matched_pattern_id: str | None = Field(
@@ -39,12 +60,9 @@ class ClassifierOutput(BaseModel):
         default=UncertainReason.NOT_APPLICABLE,
         description="Only meaningful when decision is UNCERTAIN",
     )
-    structural_deviations_found: list[dict[str, Any]] = Field(
+    structural_deviations_found: list[StructuralDeviation] = Field(
         default_factory=list,
-        description="EXHAUSTIVE list — every field-level mismatch found, "
-        "not just the first. Each item is an object: "
-        '{"field": <field name>, "template": <expected value>, '
-        '"observed": <value on this alert>}.',
+        description="EXHAUSTIVE list — every field-level mismatch found, " "not just the first.",
     )
     reasoning: str
 
