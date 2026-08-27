@@ -51,7 +51,7 @@ def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
             "tier": "provisional" | "confirmed",
             "provenance": "live" | "seeded",
             "under_review": bool,
-            "days_since_last_review": int,
+            "days_since_last_review": int,  # defaults to 9999 (never audited) when absent
             "diversity_score": float,
             "failure_count": int,
         }
@@ -82,7 +82,7 @@ def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
         "tier": data.get("tier", "provisional"),
         "provenance": data.get("provenance", "live"),
         "under_review": data.get("under_review", False),
-        "days_since_last_review": data.get("days_since_last_review", 0),
+        "days_since_last_review": data.get("days_since_last_review", 9999),
         "diversity_score": data.get("diversity_score", 0.0),
         "failure_count": data.get("failure_count", 0),
     }

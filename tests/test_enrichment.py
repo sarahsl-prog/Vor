@@ -29,6 +29,21 @@ class TestEnrich:
         assert result["status"] == "TEMPLATE"
         assert result["diversity_score"] > 0.0
 
+    def test_never_audited_pattern_reports_the_stale_sentinel_not_zero(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        """Regression for Code-review-Aug25 2.1: a freshly-graduated
+        pattern with no last_reviewed_at field yet used to report
+        days_since_last_review=0 ('reviewed today'), contradicting the
+        sweep's own 9999 ('never audited') sentinel for the exact same
+        condition -- see orchestrator._fetch_all_confirmed_patterns."""
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        result = enrich(diverse_confirmed_instances[0], fake_firestore)
+
+        assert result["days_since_last_review"] == 9999
+
 
 class TestRecordConfirmedNegative:
     def test_graduates_after_enough_diverse_instances(
