@@ -27,6 +27,7 @@ from vor_agents.orchestrator import (
     SWEEP_MAX_TARGETS_ENV_VAR,
     AgentOutputError,
     _deviation_field_names,
+    _merge_deviations,
     _run_agent,
     audit_pattern,
     classify_alert,
@@ -243,6 +244,41 @@ class TestDeviationFieldNames:
             ]
         )
         assert result == {"integrity_level"}
+
+
+class TestMergeDeviations:
+    """
+    Direct unit coverage for _merge_deviations' de-duplication logic. It's
+    only reached from classify_alert()'s ground-truth-missed override
+    (precomputed_deviations non-empty AND missed_by_model non-empty AND
+    decision==SUPPRESS), and the existing reconciliation test that reaches
+    it always passes an empty list as one of the two groups -- so the
+    actual dedup/merge branch never previously executed under test.
+    """
+
+    def test_identical_deviations_from_different_groups_collapse_to_one(self):
+        dup = {"field": "f", "template": "a", "observed": "b"}
+        result = _merge_deviations([dup], [dict(dup)])
+        assert result == [dup]
+
+    def test_same_field_different_observed_value_both_survive(self):
+        """The dangerous case to get wrong: two deviations sharing a field
+        name but differing in what was actually observed are two distinct,
+        real deviations -- collapsing them into one would silently drop
+        evidence."""
+        first = {"field": "f", "template": "a", "observed": "b"}
+        second = {"field": "f", "template": "a", "observed": "c"}
+        result = _merge_deviations([first], [second])
+        assert len(result) == 2
+        assert first in result
+        assert second in result
+
+    def test_output_ordering_is_deterministic_regardless_of_group_order(self):
+        first = {"field": "f", "template": "a", "observed": "b"}
+        second = {"field": "f", "template": "a", "observed": "c"}
+        result_first_then_second = _merge_deviations([first], [second])
+        result_second_then_first = _merge_deviations([second], [first])
+        assert result_first_then_second == result_second_then_first == [first, second]
 
 
 @pytest.mark.asyncio
