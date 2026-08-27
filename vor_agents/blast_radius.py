@@ -13,6 +13,8 @@ something HIGH/CRITICAL is the conservative move and can happen freely;
 scoring it MEDIUM/LOW requires a human to actually commit it.
 """
 
+import hashlib
+import json
 import time
 import uuid
 from datetime import UTC, datetime
@@ -107,12 +109,12 @@ def _load_table(firestore_client: Client) -> dict[tuple[str, str], float]:
         return _TABLE_CACHE
 
     try:
+        # One doc per (indicator_type, value) by construction -- doc IDs
+        # are the content hash of exactly that pair (see _table_doc_id),
+        # so a re-commit replaces its own doc rather than adding another.
+        # No "pick the newest committed_at across duplicate docs" step is
+        # needed because duplicates can't exist.
         fresh: dict[tuple[str, str], float] = {}
-        # (indicator_type, value) -> the committed_at of the entry
-        # currently winning for that key, so a later doc with an OLDER
-        # committed_at (arbitrary Firestore stream order) never
-        # clobbers a newer one already seen.
-        newest_seen: dict[tuple[str, str], datetime] = {}
         for doc in firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).stream():
             data = doc.to_dict() or {}
             indicator_type = data.get("indicator_type")
@@ -123,25 +125,7 @@ def _load_table(firestore_client: Client) -> dict[tuple[str, str], float]:
                     "blast_radius_table doc missing indicator_type/value/score, skipping"
                 )
                 continue
-            key = (indicator_type, value)
-
-            committed_at_raw = data.get("committed_at")
-            try:
-                if not isinstance(committed_at_raw, str):
-                    raise TypeError("committed_at is not a string")
-                committed_at = datetime.fromisoformat(committed_at_raw)
-            except (TypeError, ValueError):
-                # Malformed/missing committed_at -- treat as the oldest
-                # possible entry so any doc WITH a valid timestamp always
-                # wins over it, but it still populates the table if it's
-                # the only entry for this key (degrade gracefully, same
-                # posture as every other malformed-timestamp handling in
-                # this project -- see orchestrator._fetch_all_confirmed_patterns).
-                committed_at = datetime.min.replace(tzinfo=UTC)
-
-            if key not in newest_seen or committed_at >= newest_seen[key]:
-                newest_seen[key] = committed_at
-                fresh[key] = score
+            fresh[(indicator_type, value)] = score
         _TABLE_CACHE = fresh
         _TABLE_CACHE_LOADED_AT = now
         return _TABLE_CACHE
@@ -195,26 +179,41 @@ def _parse_cited_indicator(indicator: str) -> tuple[str, str]:
     return indicator_type.strip(), value.strip()
 
 
+def _table_doc_id(indicator_type: str, value: str) -> str:
+    """Content hash, not a raw f-string join -- same collision-avoidance
+    reasoning as enrichment._doc_id() and task_queue._task_name()."""
+    encoded = json.dumps([indicator_type, value], separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
 def _commit_indicators(cited_indicators: list[str], score: float, firestore_client: Client) -> None:
     """
-    Writes each cited indicator as a NEW, timestamped doc in
-    blast_radius_table -- never overwrites or merges into an existing
-    doc. This is deliberate: `set(merge=True)` on a content-hash doc ID
-    (the old scheme) silently kept a STALE score on re-commit, because
-    Firestore's merge=True does not overwrite an existing top-level
-    scalar field -- see docs/Code-review-Aug25.md 1.2. Append-only also
-    gives a free audit trail: every score this indicator has ever been
-    assigned is a readable doc, not just the latest.
+    Writes each cited indicator into blast_radius_table at the given
+    score, overwriting any prior score for the same (indicator_type,
+    value). doc_id is a content hash, so this write is naturally
+    idempotent -- re-committing the same indicator always targets the
+    same doc.
 
-    doc_id is a random uuid4, not a content hash of (indicator_type,
-    value) -- a content hash would map every commit for the same
-    indicator back onto the SAME doc, defeating the append-only design
-    by definition. _load_table() is responsible for picking the winner
-    (latest committed_at) across every doc for a given indicator.
+    Uses a PLAIN overwrite (no merge=True). docs/Code-review-Aug25.md
+    1.2 originally claimed Firestore's set(merge=True) silently keeps a
+    stale score on re-commit because merge doesn't overwrite an existing
+    top-level scalar field. This repo's own review_flag.py disproves that
+    premise for its own use case: clear_under_review() relies on
+    set({"under_review": False, ...}, merge=True) successfully flipping
+    an existing True back to False in production. A plain overwrite is
+    used here anyway -- not because merge=True would be unsafe, but
+    because it's simpler and removes any doubt, and because a prior
+    append-only version of this function (random uuid4 doc IDs, kept
+    forever, full-collection-scanned on every cache refresh on the
+    /classify hot path) traded a bug that doesn't reproduce for an
+    unbounded-growth problem this project's Task 5 (see tracing.py /
+    pending_traces) exists specifically to avoid elsewhere. See the
+    remediation branch's final-review.md finding C-2.
     """
     for indicator in cited_indicators:
         indicator_type, value = _parse_cited_indicator(indicator)
-        firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).document(str(uuid.uuid4())).set(
+        doc_id = _table_doc_id(indicator_type, value)
+        firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).document(doc_id).set(
             {
                 "indicator_type": indicator_type,
                 "value": value,

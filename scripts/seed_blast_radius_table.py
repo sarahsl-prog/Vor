@@ -5,11 +5,9 @@ before that table moved to Firestore (see
 docs/superpowers/specs/2026-08-24-blast-radius-firestore-design.md).
 
 Run once, before first production deploy against a fresh Firestore
-project -- see docs/DEPLOY.md. Note: re-running appends 5 new timestamped
-docs per run (_commit_indicators is now append-only with random UUID doc
-IDs, not content-hash merge); the resolved score for each indicator stays
-correct (_load_table picks the latest committed_at), but repeated runs do
-grow the collection rather than being a true no-op.
+project -- see docs/DEPLOY.md. Re-running is safe: _commit_indicators
+overwrites by content-hash doc ID, so re-seeding the same (indicator,
+score) pairs is a true no-op.
 
 Usage:
     .venv/bin/python scripts/seed_blast_radius_table.py
