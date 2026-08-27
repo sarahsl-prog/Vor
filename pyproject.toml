@@ -3,6 +3,10 @@ name = "vor"
 version = "0.1.0"
 description = "Self-tuning confidence layer for Windows Event Log / Hayabusa-style alert triage"
 requires-python = ">=3.13"
+dependencies = [
+    "pandas>=3.0.5",
+    "streamlit>=1.62.0",
+]
 
 [tool.black]
 line-length = 100
