@@ -179,3 +179,29 @@ class TestReplayPendingTraces:
         assert count == 1
         remaining = list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream())
         assert len(remaining) == 1
+
+    def test_replay_is_bounded_by_max_docs(self, fake_firestore, monkeypatch):
+        """Regression for Code-review-Aug25 2.2: replay_pending_traces
+        used to materialize the ENTIRE pending_traces collection into
+        memory every run -- an OOM risk during an extended MLflow
+        outage. A bounded query caps memory use per replay run; the rest
+        of the queue is picked up on the next scheduled run."""
+        monkeypatch.setattr("vor_agents.tracing.mlflow", _FakeMlflowSuccess())
+        for i in range(5):
+            self._seed_pending(fake_firestore, f"id-{i}")
+
+        count = replay_pending_traces(fake_firestore, max_docs=2)
+
+        assert count == 2
+        remaining = list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream())
+        assert len(remaining) == 3  # untouched, picked up next run
+
+    def test_replay_max_docs_defaults_from_env_var(self, fake_firestore, monkeypatch):
+        monkeypatch.setattr("vor_agents.tracing.mlflow", _FakeMlflowSuccess())
+        monkeypatch.setenv("TRACE_REPLAY_BATCH_SIZE", "1")
+        for i in range(3):
+            self._seed_pending(fake_firestore, f"id-{i}")
+
+        count = replay_pending_traces(fake_firestore)
+
+        assert count == 1

@@ -90,7 +90,7 @@ _run_idempotent() {
 # ---------------------------------------------------------------------------
 # 1. Build and deploy the Cloud Run service.
 # ---------------------------------------------------------------------------
-echo "[1/9] Deploying Cloud Run service ${SERVICE_NAME}..."
+echo "[1/10] Deploying Cloud Run service ${SERVICE_NAME}..."
 _run_idempotent run deploy "${SERVICE_NAME}" \
   --source . \
   --region "${GCP_REGION}" \
@@ -104,7 +104,7 @@ _run_idempotent run deploy "${SERVICE_NAME}" \
 # 2. Resolve SERVICE_URL if not provided.
 # ---------------------------------------------------------------------------
 if [[ -z "${SERVICE_URL:-}" ]]; then
-  echo "[2/9] SERVICE_URL not set; looking up Cloud Run service URL..."
+  echo "[2/10] SERVICE_URL not set; looking up Cloud Run service URL..."
   SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
     --region "${GCP_REGION}" \
     --format 'value(status.url)')
@@ -120,7 +120,7 @@ echo "Service URL: ${SERVICE_URL}"
 # ---------------------------------------------------------------------------
 # 3. Create the scheduler service account.
 # ---------------------------------------------------------------------------
-echo "[3/9] Ensuring scheduler/invoker service account ${SCHEDULER_SA_EMAIL}..."
+echo "[3/10] Ensuring scheduler/invoker service account ${SCHEDULER_SA_EMAIL}..."
 _run_idempotent iam service-accounts create "${SCHEDULER_SA}" \
   --display-name "Vör Cloud Scheduler invoker" || true
 
@@ -135,7 +135,7 @@ _run_idempotent run services add-iam-policy-binding "${SERVICE_NAME}" \
 # ---------------------------------------------------------------------------
 # 4. Cloud Tasks queue + IAM.
 # ---------------------------------------------------------------------------
-echo "[4/9] Ensuring Cloud Tasks queue ${TASKS_QUEUE}..."
+echo "[4/10] Ensuring Cloud Tasks queue ${TASKS_QUEUE}..."
 _run_idempotent tasks queues create "${TASKS_QUEUE}" \
   --location "${GCP_REGION}" \
   --max-attempts 5 \
@@ -151,7 +151,7 @@ _run_idempotent tasks queues add-iam-policy-binding "${TASKS_QUEUE}" \
 # ---------------------------------------------------------------------------
 # 5. Set environment variables on the Cloud Run service.
 # ---------------------------------------------------------------------------
-echo "[5/9] Updating Cloud Run environment variables..."
+echo "[5/10] Updating Cloud Run environment variables..."
 
 ENV_VARS=(
   "GCP_PROJECT=${GCP_PROJECT}"
@@ -193,7 +193,7 @@ _run_idempotent run services update "${SERVICE_NAME}" \
 # ---------------------------------------------------------------------------
 # 6. Grant the Cloud Run service account access to Vertex AI.
 # ---------------------------------------------------------------------------
-echo "[6/9] Granting roles/aiplatform.user to ${CLOUD_RUN_SA}..."
+echo "[6/10] Granting roles/aiplatform.user to ${CLOUD_RUN_SA}..."
 _run_idempotent projects add-iam-policy-binding "${GCP_PROJECT}" \
   --member "serviceAccount:${CLOUD_RUN_SA}" \
   --role "roles/aiplatform.user" || true
@@ -201,7 +201,7 @@ _run_idempotent projects add-iam-policy-binding "${GCP_PROJECT}" \
 # ---------------------------------------------------------------------------
 # 7. Cloud Scheduler jobs for /sweep and /replay-traces.
 # ---------------------------------------------------------------------------
-echo "[7/9] Ensuring Cloud Scheduler jobs..."
+echo "[7/10] Ensuring Cloud Scheduler jobs..."
 
 _run_idempotent scheduler jobs create http "vor-weekly-sweep" \
   --location "${GCP_REGION}" \
@@ -222,7 +222,7 @@ _run_idempotent scheduler jobs create http "vor-trace-replay" \
 # ---------------------------------------------------------------------------
 # 8. Pub/Sub topic + push subscription for /classify.
 # ---------------------------------------------------------------------------
-echo "[8/9] Ensuring Pub/Sub topic and subscription..."
+echo "[8/10] Ensuring Pub/Sub topic and subscription..."
 _run_idempotent pubsub topics create "${PUBSUB_TOPIC}" || true
 
 _run_idempotent pubsub subscriptions create "${PUBSUB_SUBSCRIPTION}" \
@@ -232,7 +232,16 @@ _run_idempotent pubsub subscriptions create "${PUBSUB_SUBSCRIPTION}" \
   --ack-deadline 600 || true
 
 # ---------------------------------------------------------------------------
-# 9. Summary.
+# 9. Set a Firestore TTL policy on pending_traces.queued_at.
+# ---------------------------------------------------------------------------
+echo "[9/10] Setting TTL policy on pending_traces.queued_at..."
+_run_idempotent firestore fields ttls update queued_at \
+  --collection-group=pending_traces \
+  --enable-ttl \
+  --database="${FIRESTORE_DATABASE}"
+
+# ---------------------------------------------------------------------------
+# 10. Summary.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Deployment complete ==="

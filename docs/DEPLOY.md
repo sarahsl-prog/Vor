@@ -105,6 +105,7 @@ you want:
 | `MLFLOW_EXPERIMENT_NAME` | MLflow's `Default` experiment | Always, on a shared tracking server — otherwise dev/staging/prod traces are indistinguishable after the fact. |
 | `SWEEP_MAX_TARGETS` | `10` | Tuning how much the weekly sweep costs. Every target is a model call, so this is the sweep's cost/coverage dial. Minimum 1; `0` is **rejected**, not honored — it would disable the safety-net audit path while looking like a sweep that found nothing. |
 | `BLAST_RADIUS_CACHE_TTL_SECONDS` | `300` | Trading Firestore reads against how fast a committed blast-radius entry goes live. `0` means never serve from cache. |
+| `TRACE_REPLAY_BATCH_SIZE` | `1000` | Capping how many `pending_traces` docs one scheduled replay run reads into memory. Every 15 minutes (see MLflow tracing section below) this many docs get materialized at once, so this is the replay run's memory dial. Minimum 1; a value below that is rejected and the default is used. |
 
 `SWEEP_MAX_TARGETS` and `BLAST_RADIUS_CACHE_TTL_SECONDS` are integers. A value
 that isn't a valid integer, or is below its minimum, is logged at WARNING
@@ -322,7 +323,10 @@ other unvalidated interval/threshold in this project. Reuses the
 existing `vor-scheduler` service account, same as `/sweep`. `/replay-traces`
 must never be deployed with `--allow-unauthenticated`.
 
-**Not addressed here:** no cap on `pending_traces` growth during an
-extended MLflow outage -- if the tracking server is down for days, this
-collection grows unbounded. Worth a TTL/max-size policy if real outages
-turn out to be long; revisit with real data.
+`pending_traces` growth during an extended MLflow outage is now bounded
+two ways: `replay_pending_traces()` reads at most `$TRACE_REPLAY_BATCH_SIZE`
+docs per scheduled run (default 1000, see `vor_agents/tracing.py`), and
+`scripts/deploy.sh` sets a Firestore TTL policy on `queued_at` so docs
+older than the TTL window are eventually purged even if MLflow never
+recovers. Set `TRACE_REPLAY_BATCH_SIZE` on the Cloud Run service if the
+default batch size doesn't match your traffic.
