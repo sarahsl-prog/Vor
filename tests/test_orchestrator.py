@@ -893,6 +893,44 @@ class TestSweepSurvivesMalformedLastReviewedAt:
 
         assert identity_key in enqueued  # still surfaced, not dropped
 
+    def test_malformed_timestamp_in_one_pattern_does_not_prevent_sweep_of_others(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        """Prove that the per-doc try/except isolation actually holds:
+        a malformed last_reviewed_at in ONE pattern must not prevent
+        OTHER, unrelated patterns from being processed by the same sweep."""
+        # First pattern with malformed timestamp
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        first_key = pattern_identity_key(diverse_confirmed_instances[0])
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(first_key)).update(
+            {"last_reviewed_at": "not-a-date"}
+        )
+
+        # Second pattern with different identity key and valid timestamp
+        # Use the same instances but with different detection_rule_id
+        second_instances = [
+            dict(
+                instance,
+                detection_rule_id="Different_Rule",
+                timestamp="2026-08-01T09:00:00Z",
+            )
+            for instance in diverse_confirmed_instances
+        ]
+        for instance in second_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        second_key = pattern_identity_key(second_instances[0])
+        # Explicitly set a valid timestamp (record_confirmed_negative doesn't set one)
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(second_key)).update(
+            {"last_reviewed_at": "2026-08-20T12:00:00Z"}
+        )
+
+        enqueued = run_scheduled_sweep(fake_firestore, enqueue_audit_fn=lambda k, p: True)
+
+        # Both patterns must be enqueued despite the first being malformed
+        assert first_key in enqueued
+        assert second_key in enqueued
+
 
 @pytest.mark.asyncio
 class TestTracingWiring:
