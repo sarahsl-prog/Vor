@@ -9,6 +9,7 @@ classify_alert()/audit_pattern() call, mirroring model_config.py's
 import os
 
 from google.adk.sessions import BaseSessionService, DatabaseSessionService
+from loguru import logger
 
 SESSION_DB_URL_ENV_VAR = "SESSION_DB_URL"
 # In-memory SQLite by default: zero setup for local dev and the test
@@ -18,6 +19,17 @@ SESSION_DB_URL_ENV_VAR = "SESSION_DB_URL"
 # Cloud SQL Postgres connection string (see docs/DEPLOY.md's Cloud SQL
 # section).
 DEFAULT_SESSION_DB_URL = "sqlite+aiosqlite:///:memory:"
+
+
+def _redact(db_url: str) -> str:
+    """Strips credentials before a session DB URL ever reaches a log
+    line -- production values embed a live DB password (see
+    scripts/deploy.sh's SESSION_DB_URL construction)."""
+    if "://" not in db_url or "@" not in db_url:
+        return db_url
+    scheme, rest = db_url.split("://", 1)
+    _, host_part = rest.rsplit("@", 1)
+    return f"{scheme}://***@{host_part}"
 
 
 def build_session_service() -> BaseSessionService:
@@ -43,6 +55,30 @@ def build_session_service() -> BaseSessionService:
     session created but not yet cleaned up; (2) it's the seam that lets a
     future feature reuse a session across calls (e.g. multi-turn audit
     review) without a second migration.
+
+    A $SESSION_DB_URL that can't be used (malformed, unsupported dialect)
+    does NOT raise: it's logged at ERROR and degrades to the in-memory
+    default, matching how every other environment-driven config in this
+    package behaves (model_config, firestore_config, env_config all fall
+    back and log rather than raising). That matters more here than
+    elsewhere because this runs at import time in orchestrator.py -- an
+    exception would propagate through `import main` and take /classify,
+    /sweep, /audit, and /replay-traces down together over one bad env
+    var. See final-review.md Important #6.
     """
     db_url = os.environ.get(SESSION_DB_URL_ENV_VAR, "").strip() or DEFAULT_SESSION_DB_URL
-    return DatabaseSessionService(db_url=db_url)
+    try:
+        service = DatabaseSessionService(db_url=db_url)
+    except Exception as exc:  # noqa: BLE001 — any construction failure
+        # (malformed URL, unsupported dialect) degrades to the safe
+        # in-memory default instead of taking the whole process down --
+        # this runs at import time, so an uncaught exception here would
+        # take every route down together over one bad env var. See
+        # final-review.md Important #6.
+        logger.bind(db_url=_redact(db_url), error=str(exc)).error(
+            "Failed to construct DatabaseSessionService, falling back to the "
+            "in-memory default -- sessions will not persist across restarts"
+        )
+        return DatabaseSessionService(db_url=DEFAULT_SESSION_DB_URL)
+    logger.bind(db_url=_redact(db_url)).info("Session store initialized")
+    return service

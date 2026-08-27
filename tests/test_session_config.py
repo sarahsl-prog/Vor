@@ -6,9 +6,11 @@ in-process instance), not just "a different class with the same API."
 
 import pytest
 from google.adk.sessions import DatabaseSessionService
+from loguru import logger
 
 from vor_agents.session_config import (
     SESSION_DB_URL_ENV_VAR,
+    _redact,
     build_session_service,
 )
 
@@ -35,6 +37,39 @@ class TestBuildSessionService:
         service = build_session_service()
 
         assert isinstance(service, DatabaseSessionService)  # did not raise on a blank URL
+
+    def test_malformed_url_falls_back_to_the_default_instead_of_raising(self, monkeypatch):
+        """Regression for final-review.md Important #6:
+        build_session_service() is called at import time -- a raised
+        exception here would take /classify, /sweep, /audit, and
+        /replay-traces down together over one bad env var.
+
+        "not a valid url at all" makes SQLAlchemy's URL parser raise
+        synchronously inside DatabaseSessionService.__init__, with no
+        network or real database involved."""
+        monkeypatch.setenv(SESSION_DB_URL_ENV_VAR, "not a valid url at all")
+
+        # loguru doesn't propagate to stdlib logging, so pytest's caplog
+        # never sees these records -- attach a real sink instead.
+        messages: list[str] = []
+        sink_id = logger.add(messages.append, level="ERROR")
+        try:
+            service = build_session_service()
+        finally:
+            logger.remove(sink_id)
+
+        assert isinstance(service, DatabaseSessionService)
+        # Proves the except branch actually ran, rather than the URL
+        # happening to construct fine and this test passing vacuously.
+        assert any("falling back to the in-memory default" in m for m in messages)
+
+    def test_a_password_bearing_url_is_redacted_before_it_reaches_a_log(self):
+        """Production SESSION_DB_URL values embed a live DB password (see
+        scripts/deploy.sh) -- it must never be written to a log line."""
+        redacted = _redact("postgresql+asyncpg://vor:hunter2@/vor_sessions?host=/cloudsql/x")
+
+        assert "hunter2" not in redacted
+        assert redacted.startswith("postgresql+asyncpg://***@")
 
 
 @pytest.mark.asyncio
