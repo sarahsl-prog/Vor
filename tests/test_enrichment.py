@@ -1,6 +1,8 @@
 """Tests for vor_agents.enrichment — reads, graduation writes, seeding,
 and targeted evidence invalidation."""
 
+from datetime import UTC, datetime, timedelta
+
 from vor_agents.enrichment import (
     CONFIDENCE_COLLECTION,
     _doc_id,
@@ -43,6 +45,61 @@ class TestEnrich:
             record_confirmed_negative(instance, fake_firestore)
 
         result = enrich(diverse_confirmed_instances[0], fake_firestore)
+
+        assert result["days_since_last_review"] == 9999
+
+    def test_recently_audited_pattern_reports_the_real_day_count_not_the_sentinel(
+        self, fake_firestore
+    ):
+        """Regression for final-review.md C-3: enrich() used to hardcode
+        9999 unconditionally because no confidence_doc field named
+        days_since_last_review is ever written -- only last_reviewed_at
+        is. A pattern reviewed recently must report a small number, not
+        9999."""
+        identity_key = ("rule", "parent.exe", "child.exe", "family")
+        reviewed_at = (datetime.now(UTC) - timedelta(days=3)).isoformat()
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).set(
+            {
+                "fields": {},
+                "tier": "confirmed",
+                "provenance": "live",
+                "under_review": False,
+                "last_reviewed_at": reviewed_at,
+                "diversity_score": 0.8,
+                "failure_count": 0,
+            }
+        )
+
+        result = enrich(
+            {
+                "detection_rule_id": "rule",
+                "parent_image": "parent.exe",
+                "child_image": "child.exe",
+                "endpoint_family": "family",
+            },
+            fake_firestore,
+        )
+
+        assert result["days_since_last_review"] == 3
+
+    def test_malformed_last_reviewed_at_falls_back_to_the_sentinel(self, fake_firestore):
+        """A corrupted timestamp must degrade to "never audited" (the
+        maximally-stale direction), not crash enrich() on the /classify
+        hot path."""
+        identity_key = ("rule", "parent.exe", "child.exe", "family")
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).set(
+            {"fields": {}, "tier": "confirmed", "last_reviewed_at": "not-a-timestamp"}
+        )
+
+        result = enrich(
+            {
+                "detection_rule_id": "rule",
+                "parent_image": "parent.exe",
+                "child_image": "child.exe",
+                "endpoint_family": "family",
+            },
+            fake_firestore,
+        )
 
         assert result["days_since_last_review"] == 9999
 

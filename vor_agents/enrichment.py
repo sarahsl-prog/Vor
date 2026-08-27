@@ -9,9 +9,11 @@ fetches this itself.
 import hashlib
 import json
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from google.cloud.firestore import Client
+from loguru import logger
 
 from .identity import DIFFABLE_FIELDS, build_structural_template, pattern_identity_key
 
@@ -63,6 +65,37 @@ def _doc_id(identity_key: tuple[str, ...]) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def days_since_last_review(data: dict[str, Any], *, doc_id: str = "") -> int:
+    """
+    Computes days-since-audit from a confidence_doc's stored
+    `last_reviewed_at` ISO timestamp, falling back to the 9999
+    ("never audited") sentinel when it's absent, malformed, or
+    unparseable. Shared by enrich() (the classifier's context) and
+    orchestrator._fetch_all_confirmed_patterns() (the sweep's priority
+    signal) so the two paths can never silently disagree about the same
+    pattern's staleness -- see final-review.md C-3, which found enrich()
+    hardcoding 9999 unconditionally because no confidence_doc ever
+    actually stores a `days_since_last_review` field; only
+    `last_reviewed_at` is written (see review_flag.clear_under_review).
+
+    Clamped to >= 0: a last_reviewed_at in the future (clock skew) would
+    otherwise go negative and rank this pattern as LESS stale than a
+    genuinely never-audited one -- the opposite of what "needs review"
+    should mean.
+    """
+    last_reviewed_at = data.get("last_reviewed_at")
+    if not last_reviewed_at:
+        return 9999  # never audited — treat as maximally stale
+    try:
+        reviewed_dt = datetime.fromisoformat(last_reviewed_at)
+        return max((datetime.now(UTC) - reviewed_dt).days, 0)
+    except (ValueError, TypeError):
+        logger.bind(doc_id=doc_id, last_reviewed_at=last_reviewed_at).warning(
+            "Malformed last_reviewed_at, treating as never audited"
+        )
+        return 9999
+
+
 def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
     """
     Returns either:
@@ -75,7 +108,7 @@ def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
             "tier": "provisional" | "confirmed",
             "provenance": "live" | "seeded",
             "under_review": bool,
-            "days_since_last_review": int,  # defaults to 9999 (never audited) when absent
+            "days_since_last_review": int,  # from last_reviewed_at; 9999 when never audited
             "diversity_score": float,
             "failure_count": int,
         }
@@ -106,7 +139,7 @@ def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
         "tier": data.get("tier", "provisional"),
         "provenance": data.get("provenance", "live"),
         "under_review": data.get("under_review", False),
-        "days_since_last_review": data.get("days_since_last_review", 9999),
+        "days_since_last_review": days_since_last_review(data, doc_id=doc_ref.id),
         "diversity_score": data.get("diversity_score", 0.0),
         "failure_count": data.get("failure_count", 0),
     }

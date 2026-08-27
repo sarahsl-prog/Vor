@@ -158,6 +158,13 @@ class _FakeDocRef:
         self._store = store
         self._doc_id = doc_id
 
+    @property
+    def id(self):
+        """Real firestore.DocumentReference exposes .id; this fake didn't
+        until enrich() started passing doc_ref.id as log context (see
+        enrichment.days_since_last_review)."""
+        return self._doc_id
+
     def get(self):
         return _FakeDocSnapshot(self._store.get(self._doc_id))
 
