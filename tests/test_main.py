@@ -13,6 +13,7 @@ from google.cloud.tasks_v2 import HttpMethod
 
 import main
 from vor_agents.blast_radius import ProposalAlreadyResolvedError, ProposalNotFoundError
+from vor_agents.enrichment import _doc_id
 from vor_agents.schemas import (
     AuditorAction,
     AuditorOutput,
@@ -242,6 +243,50 @@ def test_audit_endpoint_invokes_audit_pattern(fake_firestore):
     mock_audit.assert_called_once()
     assert mock_audit.call_args[0][0] == tuple(identity_key)
     assert mock_audit.call_args[0][1] == {"triggered_by": "test"}
+
+
+def test_audit_endpoint_runs_the_real_audit_pattern_end_to_end(fake_firestore):
+    """Regression for the Code-review-Aug25 Section 4 test gap: every
+    other /audit test mocks audit_pattern() itself, so nothing exercises
+    the real path from an HTTP POST body through AuditRequest validation,
+    audit_pattern()'s mark/run/clear_under_review lifecycle, and back out
+    as a JSON response. Only the LLM call itself is faked (via
+    _run_agent, same seam test_orchestrator.py's reconciliation tests
+    use) -- everything else in this request is the real code."""
+    identity_key = ["rule", "w3wp.exe", "csc.exe", "family"]
+    fake_model_response = {
+        "action": "NO_ACTION",
+        "invalidated_instance_ids": [],
+        "concerns_found": [],
+        "reasoning": "Evidence still looks solid.",
+    }
+
+    with (
+        patch("main.get_firestore_client", return_value=fake_firestore),
+        patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(return_value=fake_model_response),
+        ),
+    ):
+        client = TestClient(main.app)
+        resp = client.post(
+            "/audit",
+            json={
+                "identity_key": identity_key,
+                "pattern_data": {"triggered_by": "test", "blast_radius": 0.5},
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["action"] == "NO_ACTION"
+    assert body["reasoning"] == "Evidence still looks solid."
+
+    # under_review must be cleared by the real clear_under_review() call,
+    # not just returned in the response -- proves the full lifecycle ran,
+    # not only the LLM-call seam.
+    doc = fake_firestore.collection("confidence_docs").document(_doc_id(tuple(identity_key))).get()
+    assert doc.to_dict().get("under_review", False) is False
 
 
 def test_audit_endpoint_rejects_missing_identity_key(fake_firestore):
