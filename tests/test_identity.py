@@ -41,6 +41,21 @@ class TestPatternIdentityKey:
         assert pattern_identity_key(baseline_alert) != pattern_identity_key(drift_alert_cve_model)
 
 
+class TestPatternIdentityKeyValidation:
+    def test_missing_identity_field_raises_malformed_alert_error(self, baseline_alert):
+        """Regression for Code-review-Aug25 3.1: pattern_identity_key
+        indexed the alert dict directly, so a missing identity field
+        raised a raw KeyError -- inconsistent with this project's 'never
+        surface raw exceptions' standard, which every OTHER validation
+        path (ClassifierRequest, build_structural_template) already
+        follows."""
+        broken = dict(baseline_alert)
+        del broken["parent_image"]
+
+        with pytest.raises(MalformedAlertError, match="parent_image"):
+            pattern_identity_key(broken)
+
+
 class TestBuildStructuralTemplate:
     def test_empty_instances_returns_provisional(self):
         result = build_structural_template([])

@@ -47,7 +47,7 @@ from loguru import logger
 
 from vor_agents.enrichment import CONFIDENCE_COLLECTION, _doc_id
 from vor_agents.firestore_config import firestore_database
-from vor_agents.identity import pattern_identity_key
+from vor_agents.identity import MalformedAlertError, pattern_identity_key
 
 
 class BackfillError(Exception):
@@ -78,8 +78,8 @@ def _recover_identity_key(data: dict[str, Any]) -> tuple[str, ...]:
     for instance in instances:
         try:
             recovered.add(pattern_identity_key(instance))
-        except KeyError as exc:
-            raise BackfillError(f"confirmed_instance is missing identity field {exc}") from exc
+        except MalformedAlertError as exc:
+            raise BackfillError(f"confirmed_instance is malformed: {exc}") from exc
 
     if len(recovered) > 1:
         raise BackfillError(

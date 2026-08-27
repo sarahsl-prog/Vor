@@ -62,7 +62,7 @@ class TestRecoverIdentityKey:
     def test_instance_missing_identity_field_is_unrecoverable(self):
         broken = _instance()
         del broken["child_image"]
-        with pytest.raises(BackfillError, match="missing identity field"):
+        with pytest.raises(BackfillError, match="is malformed"):
             _recover_identity_key({"confirmed_instances": [broken]})
 
     def test_disagreeing_instances_are_unrecoverable(self):
