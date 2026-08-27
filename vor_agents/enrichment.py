@@ -13,9 +13,33 @@ from typing import Any
 
 from google.cloud.firestore import Client
 
-from .identity import build_structural_template, pattern_identity_key
+from .identity import DIFFABLE_FIELDS, build_structural_template, pattern_identity_key
 
 CONFIDENCE_COLLECTION = "confidence_docs"
+
+# Every field a stored confirmed instance is allowed to carry. Anything
+# else on the incoming alert is dropped before it's persisted -- see
+# docs/Code-review-Aug25.md 2.3. identity_key fields are included because
+# the auditor/classifier prompts and diff_alert_against_template all read
+# them straight off a stored instance; DIFFABLE_FIELDS is what the
+# deterministic diffing logic needs; the rest are bookkeeping fields
+# written by this module itself (instance_id, verified_by) or used by
+# evidence_diversity_score (host, user, timestamp).
+_IDENTITY_FIELDS = ("detection_rule_id", "parent_image", "child_image", "endpoint_family")
+CONFIRMED_INSTANCE_ALLOWED_FIELDS = frozenset(
+    _IDENTITY_FIELDS
+    + tuple(DIFFABLE_FIELDS)
+    + ("host", "user", "timestamp", "instance_id", "verified_by")
+)
+
+
+def _restrict_to_allowed_fields(instance: dict[str, Any]) -> dict[str, Any]:
+    """Drops every key not in CONFIRMED_INSTANCE_ALLOWED_FIELDS before an
+    instance is persisted to confirmed_instances. Bounds document growth
+    against Firestore's 1MiB-per-doc limit and keeps the stored evidence
+    to exactly what the deterministic logic (diffing, diversity scoring,
+    identity) actually reads -- nothing else is used downstream anyway."""
+    return {k: v for k, v in instance.items() if k in CONFIRMED_INSTANCE_ALLOWED_FIELDS}
 
 
 def _doc_id(identity_key: tuple[str, ...]) -> str:
@@ -129,11 +153,13 @@ def record_confirmed_negative(
     # overwrote instance_id, which silently discarded IDs a caller had
     # already assigned.
     instances.append(
-        {
-            **alert,
-            "instance_id": alert.get("instance_id", str(uuid.uuid4())),
-            "verified_by": "human" if human_confirmed else "bulk",
-        }
+        _restrict_to_allowed_fields(
+            {
+                **alert,
+                "instance_id": alert.get("instance_id", str(uuid.uuid4())),
+                "verified_by": "human" if human_confirmed else "bulk",
+            }
+        )
     )
 
     template = build_structural_template(instances, provenance="live")
@@ -176,11 +202,13 @@ def seed_template(
     the source dataset is.
     """
     seeded_instances = [
-        {
-            **instance,
-            "instance_id": instance.get("instance_id", str(uuid.uuid4())),
-            "verified_by": "bulk",
-        }
+        _restrict_to_allowed_fields(
+            {
+                **instance,
+                "instance_id": instance.get("instance_id", str(uuid.uuid4())),
+                "verified_by": "bulk",
+            }
+        )
         for instance in confirmed_negative_instances
     ]
     template = build_structural_template(seeded_instances, provenance="seeded")

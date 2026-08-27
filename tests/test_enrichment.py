@@ -2,6 +2,8 @@
 and targeted evidence invalidation."""
 
 from vor_agents.enrichment import (
+    CONFIDENCE_COLLECTION,
+    _doc_id,
     enrich,
     invalidate_instances,
     record_confirmed_negative,
@@ -125,6 +127,28 @@ class TestRecordConfirmedNegative:
         assert instances[0]["verified_by"] == "human"
         assert all(inst["verified_by"] == "bulk" for inst in instances[1:])
 
+    def test_record_confirmed_negative_drops_fields_outside_the_allow_list(
+        self, fake_firestore, baseline_alert
+    ):
+        """Regression for Code-review-Aug25 2.3: confirmed_instances used
+        to store the entire alert dict verbatim, unbounded -- a large or
+        deeply-nested alert repeated across many instances can push a
+        confidence doc over Firestore's 1MiB-per-doc limit. Only the
+        fields the deterministic logic actually uses should be kept."""
+        alert = {**baseline_alert, "raw_event_xml": "x" * 5000, "extra_vendor_blob": {"a": 1}}
+
+        record_confirmed_negative(alert, fake_firestore)
+
+        identity_key = pattern_identity_key(alert)
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
+        stored_instance = doc.to_dict()["confirmed_instances"][0]
+
+        assert "raw_event_xml" not in stored_instance
+        assert "extra_vendor_blob" not in stored_instance
+        assert stored_instance["host"] == baseline_alert["host"]
+        assert stored_instance["integrity_level"] == baseline_alert["integrity_level"]
+        assert stored_instance["verified_by"] == "human"
+
 
 class TestSeedTemplate:
     def test_seed_batch_meeting_threshold_enters_confirmed(
@@ -178,6 +202,21 @@ class TestSeedTemplate:
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
         stored = doc.to_dict()["confirmed_instances"]
         assert all(inst["verified_by"] == "bulk" for inst in stored)
+
+    def test_seed_template_also_drops_fields_outside_the_allow_list(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        polluted = [{**inst, "raw_event_xml": "x" * 5000} for inst in diverse_confirmed_instances]
+
+        seed_template(("rule", "p.exe", "c.exe", "family"), polluted, fake_firestore)
+
+        doc = (
+            fake_firestore.collection(CONFIDENCE_COLLECTION)
+            .document(_doc_id(("rule", "p.exe", "c.exe", "family")))
+            .get()
+        )
+        for instance in doc.to_dict()["confirmed_instances"]:
+            assert "raw_event_xml" not in instance
 
 
 class TestInvalidateInstances:
