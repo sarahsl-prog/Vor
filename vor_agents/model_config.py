@@ -19,7 +19,7 @@ from google.adk.models.base_llm import BaseLlm
 
 # Flash is the right default for both agents -- see build_classifier_agent's
 # docstring. Overridable per-deployment with GEMINI_MODEL (docs/DEPLOY.md).
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
 GEMINI_MODEL_ENV_VAR = "GEMINI_MODEL"
 

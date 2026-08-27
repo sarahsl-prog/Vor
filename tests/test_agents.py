@@ -130,3 +130,11 @@ class TestModelResolution:
         monkeypatch.delenv(GEMINI_MODEL_ENV_VAR, raising=False)
 
         assert build().model == DEFAULT_GEMINI_MODEL
+
+    def test_default_model_is_a_real_flash_model_id(self):
+        """Regression for the Aug25 code review: DEFAULT_GEMINI_MODEL was
+        `gemini-3.5-flash`, which does not exist as a Google model. This
+        pins the default to the well-known-valid family/version pattern
+        so a future typo'd default fails a fast unit test instead of
+        the first real Vertex AI call in production."""
+        assert DEFAULT_GEMINI_MODEL == "gemini-2.0-flash"
