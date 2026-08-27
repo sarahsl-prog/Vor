@@ -33,7 +33,19 @@ def evidence_diversity_score(confirmed_instances: list[dict[str, Any]]) -> float
     ratios = []
 
     for dim in ("host", "user"):
-        values = {inst[dim] for inst in confirmed_instances if dim in inst}
+        values = set()
+        for inst in confirmed_instances:
+            if dim not in inst:
+                continue
+            try:
+                values.add(inst[dim])
+            except TypeError:
+                # A non-hashable value (list/dict) from a bad ingestion
+                # pipeline -- skip it rather than crash. This function is
+                # designed to degrade gracefully when a dimension isn't
+                # usable, same as the "field absent" case already handled
+                # by `if dim not in inst`. See docs/Code-review-Aug25.md 3.2.
+                continue
         if values:
             ratios.append(min(len(values) / n, 1.0))
 

@@ -1,7 +1,11 @@
 """Tests for vor_agents.enrichment — reads, graduation writes, seeding,
 and targeted evidence invalidation."""
 
+from datetime import UTC, datetime, timedelta
+
 from vor_agents.enrichment import (
+    CONFIDENCE_COLLECTION,
+    _doc_id,
     enrich,
     invalidate_instances,
     record_confirmed_negative,
@@ -28,6 +32,76 @@ class TestEnrich:
         result = enrich(baseline_alert, fake_firestore)
         assert result["status"] == "TEMPLATE"
         assert result["diversity_score"] > 0.0
+
+    def test_never_audited_pattern_reports_the_stale_sentinel_not_zero(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        """Regression for Code-review-Aug25 2.1: a freshly-graduated
+        pattern with no last_reviewed_at field yet used to report
+        days_since_last_review=0 ('reviewed today'), contradicting the
+        sweep's own 9999 ('never audited') sentinel for the exact same
+        condition -- see orchestrator._fetch_all_confirmed_patterns."""
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+
+        result = enrich(diverse_confirmed_instances[0], fake_firestore)
+
+        assert result["days_since_last_review"] == 9999
+
+    def test_recently_audited_pattern_reports_the_real_day_count_not_the_sentinel(
+        self, fake_firestore
+    ):
+        """Regression for final-review.md C-3: enrich() used to hardcode
+        9999 unconditionally because no confidence_doc field named
+        days_since_last_review is ever written -- only last_reviewed_at
+        is. A pattern reviewed recently must report a small number, not
+        9999."""
+        identity_key = ("rule", "parent.exe", "child.exe", "family")
+        reviewed_at = (datetime.now(UTC) - timedelta(days=3)).isoformat()
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).set(
+            {
+                "fields": {},
+                "tier": "confirmed",
+                "provenance": "live",
+                "under_review": False,
+                "last_reviewed_at": reviewed_at,
+                "diversity_score": 0.8,
+                "failure_count": 0,
+            }
+        )
+
+        result = enrich(
+            {
+                "detection_rule_id": "rule",
+                "parent_image": "parent.exe",
+                "child_image": "child.exe",
+                "endpoint_family": "family",
+            },
+            fake_firestore,
+        )
+
+        assert result["days_since_last_review"] == 3
+
+    def test_malformed_last_reviewed_at_falls_back_to_the_sentinel(self, fake_firestore):
+        """A corrupted timestamp must degrade to "never audited" (the
+        maximally-stale direction), not crash enrich() on the /classify
+        hot path."""
+        identity_key = ("rule", "parent.exe", "child.exe", "family")
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).set(
+            {"fields": {}, "tier": "confirmed", "last_reviewed_at": "not-a-timestamp"}
+        )
+
+        result = enrich(
+            {
+                "detection_rule_id": "rule",
+                "parent_image": "parent.exe",
+                "child_image": "child.exe",
+                "endpoint_family": "family",
+            },
+            fake_firestore,
+        )
+
+        assert result["days_since_last_review"] == 9999
 
 
 class TestRecordConfirmedNegative:
@@ -110,6 +184,28 @@ class TestRecordConfirmedNegative:
         assert instances[0]["verified_by"] == "human"
         assert all(inst["verified_by"] == "bulk" for inst in instances[1:])
 
+    def test_record_confirmed_negative_drops_fields_outside_the_allow_list(
+        self, fake_firestore, baseline_alert
+    ):
+        """Regression for Code-review-Aug25 2.3: confirmed_instances used
+        to store the entire alert dict verbatim, unbounded -- a large or
+        deeply-nested alert repeated across many instances can push a
+        confidence doc over Firestore's 1MiB-per-doc limit. Only the
+        fields the deterministic logic actually uses should be kept."""
+        alert = {**baseline_alert, "raw_event_xml": "x" * 5000, "extra_vendor_blob": {"a": 1}}
+
+        record_confirmed_negative(alert, fake_firestore)
+
+        identity_key = pattern_identity_key(alert)
+        doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).get()
+        stored_instance = doc.to_dict()["confirmed_instances"][0]
+
+        assert "raw_event_xml" not in stored_instance
+        assert "extra_vendor_blob" not in stored_instance
+        assert stored_instance["host"] == baseline_alert["host"]
+        assert stored_instance["integrity_level"] == baseline_alert["integrity_level"]
+        assert stored_instance["verified_by"] == "human"
+
 
 class TestSeedTemplate:
     def test_seed_batch_meeting_threshold_enters_confirmed(
@@ -163,6 +259,21 @@ class TestSeedTemplate:
         doc = fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(key)).get()
         stored = doc.to_dict()["confirmed_instances"]
         assert all(inst["verified_by"] == "bulk" for inst in stored)
+
+    def test_seed_template_also_drops_fields_outside_the_allow_list(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        polluted = [{**inst, "raw_event_xml": "x" * 5000} for inst in diverse_confirmed_instances]
+
+        seed_template(("rule", "p.exe", "c.exe", "family"), polluted, fake_firestore)
+
+        doc = (
+            fake_firestore.collection(CONFIDENCE_COLLECTION)
+            .document(_doc_id(("rule", "p.exe", "c.exe", "family")))
+            .get()
+        )
+        for instance in doc.to_dict()["confirmed_instances"]:
+            assert "raw_event_xml" not in instance
 
 
 class TestInvalidateInstances:

@@ -15,10 +15,21 @@ import mlflow
 from google.cloud.firestore import Client
 from loguru import logger
 
+from .env_config import env_int
+
 if TYPE_CHECKING:
     from .schemas import AuditorOutput, ClassifierOutput
 
 PENDING_TRACES_COLLECTION = "pending_traces"
+
+DEFAULT_TRACE_REPLAY_BATCH_SIZE = 1000
+TRACE_REPLAY_BATCH_SIZE_ENV_VAR = "TRACE_REPLAY_BATCH_SIZE"
+# Caps how many pending_traces docs one replay run reads into memory.
+# Previously unbounded -- see docs/Code-review-Aug25.md 2.2 -- an extended
+# MLflow outage grows this collection without limit, and materializing
+# all of it every 15 minutes (see docs/DEPLOY.md's replay schedule) is an
+# avoidable OOM risk. 1000 is an unvalidated starting point, same posture
+# as every other unvalidated interval/threshold in this project.
 
 
 class TracingError(Exception):
@@ -98,24 +109,46 @@ def log_classification_trace(
         "enrichment": enrichment,
         "decision": classifier_output.decision,
         "uncertain_reason": classifier_output.uncertain_reason,
-        "structural_deviations_found": classifier_output.structural_deviations_found,
+        # .model_dump() per item, not the StructuralDeviation objects
+        # themselves: both sinks below need plain JSON-compatible values
+        # (mlflow.log_dict json-serializes; the pending_traces fallback
+        # writes into Firestore, which can't store a pydantic model
+        # either). Passing the models straight through fails BOTH sinks
+        # and the trace is lost to a log line -- see final-review C-1,
+        # which changed this field from list[dict] to
+        # list[StructuralDeviation].
+        "structural_deviations_found": [
+            deviation.model_dump() for deviation in classifier_output.structural_deviations_found
+        ],
         "reasoning": classifier_output.reasoning,
         "overrides_fired": overrides_fired,
     }
     _log_run("classification", run_data, firestore_client)
 
 
-def replay_pending_traces(firestore_client: Client) -> int:
+def replay_pending_traces(firestore_client: Client, max_docs: int | None = None) -> int:
     """
-    Reads every doc in pending_traces, attempts to log each to MLflow;
+    Reads up to `max_docs` docs in pending_traces (default: $TRACE_REPLAY_BATCH_SIZE,
+    else DEFAULT_TRACE_REPLAY_BATCH_SIZE), attempts to log each to MLflow;
     on success deletes the doc, on failure leaves it for the next
     scheduled run (see main.py's POST /replay-traces). Returns the count
     successfully replayed. Each doc gets its own try/except -- one bad or
     still-failing doc doesn't block the rest of the batch.
+
+    Bounded rather than draining the whole collection in one call --
+    during an extended MLflow outage this collection can grow far larger
+    than fits comfortably in memory; the next scheduled run picks up
+    whatever this one didn't reach. See docs/Code-review-Aug25.md 2.2.
     """
+    if max_docs is None:
+        max_docs = env_int(
+            TRACE_REPLAY_BATCH_SIZE_ENV_VAR, DEFAULT_TRACE_REPLAY_BATCH_SIZE, minimum=1
+        )
+
     replayed = 0
     still_pending = 0
-    for doc in list(firestore_client.collection(PENDING_TRACES_COLLECTION).stream()):
+    docs = list(firestore_client.collection(PENDING_TRACES_COLLECTION).limit(max_docs).stream())
+    for doc in docs:
         data = doc.to_dict() or {}
         run_type = data.get("run_type", "unknown")
         run_data = data.get("run_data", {})

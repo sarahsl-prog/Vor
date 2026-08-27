@@ -158,6 +158,13 @@ class _FakeDocRef:
         self._store = store
         self._doc_id = doc_id
 
+    @property
+    def id(self):
+        """Real firestore.DocumentReference exposes .id; this fake didn't
+        until enrich() started passing doc_ref.id as log context (see
+        enrichment.days_since_last_review)."""
+        return self._doc_id
+
     def get(self):
         return _FakeDocSnapshot(self._store.get(self._doc_id))
 
@@ -189,6 +196,10 @@ class _FakeCollection:
         assert op == "=="
         matches = {doc_id: data for doc_id, data in self._store.items() if data.get(field) == value}
         return _FakeQuery(matches)
+
+    def limit(self, count):
+        limited = dict(list(self._store.items())[:count])
+        return _FakeQuery(limited)
 
     def stream(self):
         for doc_id, data in self._store.items():

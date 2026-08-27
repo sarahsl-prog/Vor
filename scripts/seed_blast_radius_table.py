@@ -5,9 +5,9 @@ before that table moved to Firestore (see
 docs/superpowers/specs/2026-08-24-blast-radius-firestore-design.md).
 
 Run once, before first production deploy against a fresh Firestore
-project -- see docs/DEPLOY.md. Idempotent: re-running just overwrites the
-same 5 entries with the same values (merge=True in _commit_indicators),
-so it's safe to run more than once.
+project -- see docs/DEPLOY.md. Re-running is safe: _commit_indicators
+overwrites by content-hash doc ID, so re-seeding the same (indicator,
+score) pairs is a true no-op.
 
 Usage:
     .venv/bin/python scripts/seed_blast_radius_table.py

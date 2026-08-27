@@ -56,6 +56,9 @@ def _validate_diffable_fields(instance: dict[str, Any]) -> None:
         )
 
 
+IDENTITY_KEY_FIELDS = ("detection_rule_id", "parent_image", "child_image", "endpoint_family")
+
+
 def pattern_identity_key(alert: dict[str, Any]) -> tuple[str, ...]:
     """
     (detection_rule_id, parent_image, child_image, endpoint_family)
@@ -64,13 +67,19 @@ def pattern_identity_key(alert: dict[str, Any]) -> tuple[str, ...]:
     were part of identity, an attacker repeating a technique would just
     spawn "new, unmatched patterns" forever instead of ever tripping the
     deviation check against the legitimate one.
+
+    Raises MalformedAlertError (not a raw KeyError) if any identity field
+    is missing -- HTTP callers already get this via ClassifierRequest's
+    validation, but internal callers (scripts/seed_firestore.py,
+    scripts/backfill_identity_key.py, enrichment.record_confirmed_negative)
+    pass plain dicts straight through, and a raw KeyError there violated
+    this project's "never surface raw exceptions" standard. See
+    docs/Code-review-Aug25.md 3.1.
     """
-    return (
-        alert["detection_rule_id"],
-        alert["parent_image"],
-        alert["child_image"],
-        alert["endpoint_family"],
-    )
+    missing = [field for field in IDENTITY_KEY_FIELDS if field not in alert]
+    if missing:
+        raise MalformedAlertError(f"Alert is missing required identity field(s): {missing}")
+    return tuple(alert[field] for field in IDENTITY_KEY_FIELDS)
 
 
 def build_structural_template(
@@ -127,14 +136,20 @@ def build_structural_template(
 
 def diff_alert_against_template(
     alert: dict[str, Any], template_fields: dict[str, Any]
-) -> list[str]:
+) -> list[dict[str, Any]]:
     """
     Exhaustive diff — every field checked, never short-circuits on first
-    mismatch. Returns human-readable deviation strings, empty list if none.
+    mismatch. Returns structured deviation objects, empty list if none:
+    [{"field": str, "template": <expected value>, "observed": <alert's
+    value>}, ...]. Structured rather than a formatted string (see
+    docs/Code-review-Aug25.md 3.3/3.4/decision 4) so orchestrator.py's
+    reconciliation compares by field name without parsing free text, and
+    a caller inspecting a real mismatch's values doesn't have to un-repr
+    them out of a sentence.
     """
     deviations = []
     for field, expected in template_fields.items():
         observed = alert.get(field)
         if observed != expected:
-            deviations.append(f"{field}: template={expected!r}, observed={observed!r}")
+            deviations.append({"field": field, "template": expected, "observed": observed})
     return deviations

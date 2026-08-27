@@ -67,7 +67,7 @@ class TestLoadInstancesFromFile:
         instances = generate_case(DatasetCase.SEEDED_CONFIRMED)["instances"]
         del instances[2]["child_image"]
 
-        with pytest.raises(SeedInputError, match=r"\[2\] is missing identity field"):
+        with pytest.raises(SeedInputError, match=r"\[2\] is malformed"):
             load_instances_from_file(_write_json(tmp_path, instances))
 
     def test_validation_happens_before_any_write(self, tmp_path, fake_firestore):

@@ -76,3 +76,20 @@ def test_valid_and_malformed_timestamps_mixed_only_valid_counted():
     # (which would happen if the malformed one silently produced its own
     # bogus "hour").
     assert score == (1.0 + 1.0 + 2 / 3) / 3
+
+
+def test_non_hashable_host_value_is_skipped_not_a_crash():
+    """Regression for Code-review-Aug25 3.2: a bad ingestion pipeline
+    storing a list/dict in `host` or `user` used to raise TypeError
+    from the set comprehension -- this function is otherwise designed
+    to degrade gracefully (see module docstring), so a malformed
+    dimension should be skipped, not fatal."""
+    instances = [
+        {"host": ["not", "hashable"], "user": "jsmith", "timestamp": "2026-08-01T09:00:00Z"},
+        {"host": "SRV-01", "user": "mjones", "timestamp": "2026-08-02T10:00:00Z"},
+    ]
+
+    score = evidence_diversity_score(instances)
+
+    assert isinstance(score, float)
+    assert 0.0 <= score <= 1.0

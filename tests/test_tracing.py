@@ -6,6 +6,8 @@ with small fakes so these tests never need network access or a real
 tracking server.
 """
 
+import json
+
 from vor_agents.schemas import (
     AuditorAction,
     AuditorOutput,
@@ -38,6 +40,16 @@ class _FakeMlflowSuccess:
 
     def log_dict(self, data, path):
         pass
+
+
+class _FakeMlflowStrictJson(_FakeMlflowSuccess):
+    """Like _FakeMlflowSuccess, but actually json-serializes what it's
+    handed -- the real mlflow.log_dict() does, and the no-op fake above
+    can't catch a payload that isn't JSON-serializable (see
+    TestTraceablePayload)."""
+
+    def log_dict(self, data, path):
+        json.dumps(data)
 
 
 class _FakeMlflowAlwaysFails:
@@ -105,6 +117,61 @@ class TestLogClassificationTrace:
             [],
             _BoomFirestoreClient(),
         )
+
+
+class TestTraceablePayload:
+    """Regression for final-review C-1's knock-on effect: once
+    structural_deviations_found became list[StructuralDeviation], passing
+    it straight into run_data broke BOTH tracing sinks at once (mlflow
+    json-serializes; the Firestore fallback can't store a pydantic model
+    either), so a classification with any real deviation lost its trace
+    entirely. Every other trace test in this file happens to use an empty
+    list, which is why nothing caught it."""
+
+    def _output_with_deviations(self):
+        return ClassifierOutput(
+            decision=Decision.ESCALATE,
+            matched_pattern_id="test",
+            uncertain_reason=UncertainReason.NOT_APPLICABLE,
+            structural_deviations_found=[
+                {"field": "integrity_level", "template": "Medium", "observed": "High"}
+            ],
+            reasoning="deviation found",
+        )
+
+    def test_deviations_are_json_serializable_for_mlflow(self, fake_firestore, monkeypatch):
+        monkeypatch.setattr("vor_agents.tracing.mlflow", _FakeMlflowStrictJson())
+
+        log_classification_trace(
+            {"detection_rule_id": "r"},
+            {"status": "TEMPLATE"},
+            self._output_with_deviations(),
+            [],
+            fake_firestore,
+        )
+
+        # Reaching here without raising means log_dict json-serialized the
+        # payload; nothing fell back to Firestore.
+        assert list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream()) == []
+
+    def test_deviations_reach_the_firestore_fallback_as_plain_dicts(
+        self, fake_firestore, monkeypatch
+    ):
+        monkeypatch.setattr("vor_agents.tracing.mlflow", _FakeMlflowAlwaysFails())
+
+        log_classification_trace(
+            {"detection_rule_id": "r"},
+            {"status": "TEMPLATE"},
+            self._output_with_deviations(),
+            [],
+            fake_firestore,
+        )
+
+        docs = list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream())
+        assert len(docs) == 1
+        assert docs[0].to_dict()["run_data"]["structural_deviations_found"] == [
+            {"field": "integrity_level", "template": "Medium", "observed": "High"}
+        ]
 
 
 class TestLogAuditTrace:
@@ -179,3 +246,29 @@ class TestReplayPendingTraces:
         assert count == 1
         remaining = list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream())
         assert len(remaining) == 1
+
+    def test_replay_is_bounded_by_max_docs(self, fake_firestore, monkeypatch):
+        """Regression for Code-review-Aug25 2.2: replay_pending_traces
+        used to materialize the ENTIRE pending_traces collection into
+        memory every run -- an OOM risk during an extended MLflow
+        outage. A bounded query caps memory use per replay run; the rest
+        of the queue is picked up on the next scheduled run."""
+        monkeypatch.setattr("vor_agents.tracing.mlflow", _FakeMlflowSuccess())
+        for i in range(5):
+            self._seed_pending(fake_firestore, f"id-{i}")
+
+        count = replay_pending_traces(fake_firestore, max_docs=2)
+
+        assert count == 2
+        remaining = list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream())
+        assert len(remaining) == 3  # untouched, picked up next run
+
+    def test_replay_max_docs_defaults_from_env_var(self, fake_firestore, monkeypatch):
+        monkeypatch.setattr("vor_agents.tracing.mlflow", _FakeMlflowSuccess())
+        monkeypatch.setenv("TRACE_REPLAY_BATCH_SIZE", "1")
+        for i in range(3):
+            self._seed_pending(fake_firestore, f"id-{i}")
+
+        count = replay_pending_traces(fake_firestore)
+
+        assert count == 1

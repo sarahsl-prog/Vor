@@ -7,13 +7,11 @@ auditor_agent.py) with no orchestration logic of its own.
 
 import json
 import uuid
-from collections.abc import Callable
-from datetime import UTC, datetime
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from google.adk.agents import Agent
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
 from google.cloud.firestore import Client
 from google.genai.types import Content, Part
 from loguru import logger
@@ -23,7 +21,7 @@ from .audit_targets import select_audit_targets
 from .auditor_agent import build_auditor_agent
 from .blast_radius import estimate_blast_radius
 from .classifier_agent import build_classifier_agent
-from .enrichment import CONFIDENCE_COLLECTION, _doc_id, enrich
+from .enrichment import CONFIDENCE_COLLECTION, _doc_id, days_since_last_review, enrich
 from .env_config import env_int
 from .evidence_diversity import evidence_diversity_score
 from .identity import diff_alert_against_template
@@ -38,13 +36,15 @@ from .schemas import (
     AuditorOutput,
     ClassifierOutput,
     Decision,
+    StructuralDeviation,
     UncertainReason,
 )
+from .session_config import build_session_service
 from .tracing import log_audit_trace, log_classification_trace
 
-session_service = InMemorySessionService()  # swap for a persistent
-# SessionService in production;
-# fine for a hackathon demo
+session_service = build_session_service()  # see session_config.py --
+# DatabaseSessionService, backed by Cloud SQL in production and an
+# in-memory SQLite database locally/in tests.
 
 DEFAULT_SWEEP_MAX_TARGETS = 10
 SWEEP_MAX_TARGETS_ENV_VAR = "SWEEP_MAX_TARGETS"
@@ -177,36 +177,88 @@ async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[st
         ) from exc
 
 
-def _deviation_field_names(deviation_strings: list[str]) -> set[str]:
+def _deviation_field_names(
+    deviations: Sequence[StructuralDeviation | dict[str, Any]],
+) -> set[str]:
     """
-    Extracts just the field name from each deviation string (format:
-    "field_name: template=X, observed=Y" — see diff_alert_against_template()
-    and the schema description for structural_deviations_found). Comparing
-    by field name rather than exact string match is deliberate: the model
-    is asked to follow this format but isn't guaranteed to phrase the
-    template/observed values identically to the Python-computed version
-    (repr formatting, quoting, etc.) — field name is the part that actually
-    matters for reconciliation, not incidental text differences.
+    Extracts just the field name from each structured deviation (see
+    StructuralDeviation in schemas.py). Comparing by field name rather
+    than the full object is deliberate: the model is asked to follow this
+    schema but isn't guaranteed to serialize template/observed identically
+    to the Python-computed version (type coercion, formatting) — field
+    name is the part that actually matters for reconciliation.
 
-    A string with no colon (the model not following the format at all,
-    e.g. "integrity_level observed High instead of Medium") previously got
-    treated as a whole-string field name, which can't match a real
-    template field and would never be found equal to anything on either
-    side of the reconciliation diff in classify_alert(). That's silently
-    fragile in the dangerous direction: it can make a real deviation look
-    unreported ("missed_by_model") when the model actually did report it,
-    just not in the expected format — skip and log instead of guessing.
+    Accepts a plain dict too (isinstance-checked), not just
+    StructuralDeviation: diff_alert_against_template() in identity.py is
+    deliberately pydantic-free and still produces plain
+    {"field": ..., "template": ..., "observed": ...} dicts, and this
+    function's own unit tests (TestDeviationFieldNames) also pass
+    hand-built dicts directly.
+
+    The "missing field key" branch below is effectively unreachable via
+    classify_alert()'s real path now that structural_deviations_found is
+    list[StructuralDeviation] with a required `field: str` -- a model
+    response missing "field" now fails ClassifierOutput's own pydantic
+    validation before classify_alert() ever runs, which degrades that
+    call to UNCERTAIN via the existing ValidationError -> AgentOutputError
+    conversion in _run_agent (see run_agent.py), never reaching this
+    function at all. That's a *safer* outcome than before, not a gap: the
+    check that used to live here now lives one layer earlier, enforced by
+    the type system instead of by hand. Kept here anyway as defense in
+    depth for the identity.py (dict) call path, which has no such
+    upstream validation.
     """
-    parsed = set()
-    for d in deviation_strings:
-        d = d.strip()
-        if not d:
+    parsed: set[str] = set()
+    for d in deviations:
+        # Annotated Any rather than str: the dict branch's .get() can
+        # return anything at all, and narrowing it here (e.g. dropping a
+        # non-str field name) would shrink precomputed_fields, which is
+        # the UNSAFE direction -- a dropped ground-truth deviation stops
+        # being counted as "missed by the model" and the ESCALATE
+        # override never fires. Falsy values are still skipped below.
+        field: Any
+        if isinstance(d, StructuralDeviation):
+            field = d.field
+        elif isinstance(d, dict):
+            field = d.get("field")
+        else:
+            field = None
+        if not field:
+            logger.warning("Deviation object missing a 'field' key: {}", d)
             continue
-        if ":" not in d:
-            logger.warning("Deviation string missing expected 'field:' prefix: {}", d)
-            continue
-        parsed.add(d.split(":", 1)[0].strip())
+        parsed.add(field)
     return parsed
+
+
+def _merge_deviations(
+    *groups: Sequence[StructuralDeviation | dict[str, Any]],
+) -> list[StructuralDeviation]:
+    """
+    Merges deviation lists -- StructuralDeviation instances (the model's
+    validated output) or plain dicts (diff_alert_against_template's
+    pydantic-free deterministic path) -- into one deduplicated, sorted
+    list of StructuralDeviation instances. The output MUST already be
+    StructuralDeviation, not a mix: ClassifierOutput.model_copy(update=...)
+    does not re-validate its update dict against the field's declared
+    type, so whatever this function returns becomes the field's actual
+    runtime value verbatim.
+
+    Dedup key is the JSON-serialized, sorted-keys dump of each normalized
+    deviation, so two structurally-identical deviations from different
+    sources (ground truth vs. model) collapse into one; sorted by that
+    same key for deterministic output ordering.
+    """
+    seen: dict[str, StructuralDeviation] = {}
+    for group in groups:
+        for deviation in group:
+            normalized = (
+                deviation
+                if isinstance(deviation, StructuralDeviation)
+                else StructuralDeviation.model_validate(deviation)
+            )
+            key = json.dumps(normalized.model_dump(), sort_keys=True, default=str)
+            seen[key] = normalized
+    return [seen[key] for key in sorted(seen)]
 
 
 async def classify_alert(
@@ -378,9 +430,8 @@ async def classify_alert(
             classifier_output = classifier_output.model_copy(
                 update={
                     "decision": "ESCALATE",
-                    "structural_deviations_found": sorted(
-                        set(classifier_output.structural_deviations_found)
-                        | set(precomputed_deviations)
+                    "structural_deviations_found": _merge_deviations(
+                        classifier_output.structural_deviations_found, precomputed_deviations
                     ),
                     "reasoning": (
                         classifier_output.reasoning
@@ -495,7 +546,7 @@ async def audit_pattern(
         logger.bind(identity_key=identity_key).exception("Audit failed")
         decision = AuditorOutput(
             action=AuditorAction.NO_ACTION,
-            reasoning=f"Audit failed with error: {exc!r}",
+            reasoning=f"Audit failed with error: {last_error_repr}",
         )
     finally:
         new_failure_count = clear_under_review(
@@ -647,21 +698,12 @@ def _fetch_all_confirmed_patterns(firestore_client: Client) -> list[dict[str, An
             )
             continue
 
-        last_reviewed_at = data.get("last_reviewed_at")
-        if last_reviewed_at:
-            reviewed_dt = datetime.fromisoformat(last_reviewed_at)
-            # Clamped to >= 0: a last_reviewed_at in the future (clock
-            # skew between whatever wrote it and this read) would
-            # otherwise go negative and make select_audit_targets() rank
-            # this pattern BELOW patterns that are genuinely never-
-            # audited — the opposite of what "needs review" should mean.
-            # select_audit_targets() clamps too (defense in depth for
-            # direct callers of that function), but the sentinel-value
-            # comment below only makes sense if this is never negative to
-            # begin with.
-            days_since = max((datetime.now(UTC) - reviewed_dt).days, 0)
-        else:
-            days_since = 9999  # never audited — treat as maximally stale
+        # Shared with enrich() rather than parsed inline here -- see
+        # enrichment.days_since_last_review, which also carries the
+        # clamp/malformed-timestamp reasoning this block used to spell
+        # out. Two copies of it silently disagreeing about the same
+        # pattern's staleness is exactly what final-review C-3 found.
+        days_since = days_since_last_review(data, doc_id=doc.id)
 
         patterns.append(
             {

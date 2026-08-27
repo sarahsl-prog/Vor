@@ -111,6 +111,40 @@ class TestEstimateBlastRadiusFromFirestore:
 
         assert result == 0.95  # still the cached value, not the mutated one
 
+    def test_recommitting_same_indicator_with_a_new_score_wins(self, fake_firestore):
+        """Regression for Code-review-Aug25 1.2 (and its later revision,
+        final-review.md C-2): re-committing the same indicator must make
+        the NEW score win. _commit_indicators writes a content-hash doc
+        ID with a plain overwrite -- re-committing the same
+        (indicator_type, value) always targets and replaces the same
+        doc."""
+        from vor_agents.blast_radius import _commit_indicators
+
+        _commit_indicators(["parent_image=lsass.exe"], 0.95, fake_firestore)
+        reset_table_cache()
+        first = estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)
+        assert first == 0.95
+
+        _commit_indicators(["parent_image=lsass.exe"], 0.30, fake_firestore)
+        reset_table_cache()
+        second = estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)
+        assert second == 0.30  # the new score must win, not the stale 0.95
+
+    def test_recommit_overwrites_the_same_doc_rather_than_accumulating(self, fake_firestore):
+        """The content-hash doc ID means a re-commit targets and replaces
+        the existing doc for this indicator, not a new one -- exactly one
+        doc must exist for (parent_image, lsass.exe) no matter how many
+        times it's re-committed."""
+        from vor_agents.blast_radius import _commit_indicators
+
+        _commit_indicators(["parent_image=lsass.exe"], 0.95, fake_firestore)
+        _commit_indicators(["parent_image=lsass.exe"], 0.30, fake_firestore)
+        _commit_indicators(["parent_image=lsass.exe"], 0.60, fake_firestore)
+
+        docs = list(fake_firestore.collection(BLAST_RADIUS_TABLE_COLLECTION).stream())
+        assert len(docs) == 1
+        assert docs[0].to_dict()["score"] == 0.60
+
     def test_stale_cache_served_on_refresh_failure(self, fake_firestore, monkeypatch):
         self._seed_entry(fake_firestore, "parent_image", "lsass.exe", 0.95)
         estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)  # populates cache

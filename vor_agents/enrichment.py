@@ -9,13 +9,50 @@ fetches this itself.
 import hashlib
 import json
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from google.cloud.firestore import Client
+from loguru import logger
 
-from .identity import build_structural_template, pattern_identity_key
+from .identity import (
+    DIFFABLE_FIELDS,
+    IDENTITY_KEY_FIELDS,
+    build_structural_template,
+    pattern_identity_key,
+)
 
 CONFIDENCE_COLLECTION = "confidence_docs"
+
+# Every field a stored confirmed instance is allowed to carry. Anything
+# else on the incoming alert is dropped before it's persisted -- see
+# docs/Code-review-Aug25.md 2.3. identity_key fields are included because
+# the auditor/classifier prompts and diff_alert_against_template all read
+# them straight off a stored instance; DIFFABLE_FIELDS is what the
+# deterministic diffing logic needs; the rest are bookkeeping fields
+# written by this module itself (instance_id, verified_by) or used by
+# evidence_diversity_score (host, user, timestamp).
+#
+# IDENTITY_KEY_FIELDS is imported from identity.py rather than restated
+# here: this module used to hand-duplicate the same 4-tuple, and if the
+# two ever drifted, this allow-list would silently strip whichever field
+# identity.py had gained, making pattern_identity_key(stored_instance)
+# raise "malformed instance" on every doc with no hint that a stale
+# allow-list was the real cause. See final-review.md C-5.
+CONFIRMED_INSTANCE_ALLOWED_FIELDS = frozenset(
+    IDENTITY_KEY_FIELDS
+    + tuple(DIFFABLE_FIELDS)
+    + ("host", "user", "timestamp", "instance_id", "verified_by")
+)
+
+
+def _restrict_to_allowed_fields(instance: dict[str, Any]) -> dict[str, Any]:
+    """Drops every key not in CONFIRMED_INSTANCE_ALLOWED_FIELDS before an
+    instance is persisted to confirmed_instances. Bounds document growth
+    against Firestore's 1MiB-per-doc limit and keeps the stored evidence
+    to exactly what the deterministic logic (diffing, diversity scoring,
+    identity) actually reads -- nothing else is used downstream anyway."""
+    return {k: v for k, v in instance.items() if k in CONFIRMED_INSTANCE_ALLOWED_FIELDS}
 
 
 def _doc_id(identity_key: tuple[str, ...]) -> str:
@@ -39,6 +76,37 @@ def _doc_id(identity_key: tuple[str, ...]) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def days_since_last_review(data: dict[str, Any], *, doc_id: str = "") -> int:
+    """
+    Computes days-since-audit from a confidence_doc's stored
+    `last_reviewed_at` ISO timestamp, falling back to the 9999
+    ("never audited") sentinel when it's absent, malformed, or
+    unparseable. Shared by enrich() (the classifier's context) and
+    orchestrator._fetch_all_confirmed_patterns() (the sweep's priority
+    signal) so the two paths can never silently disagree about the same
+    pattern's staleness -- see final-review.md C-3, which found enrich()
+    hardcoding 9999 unconditionally because no confidence_doc ever
+    actually stores a `days_since_last_review` field; only
+    `last_reviewed_at` is written (see review_flag.clear_under_review).
+
+    Clamped to >= 0: a last_reviewed_at in the future (clock skew) would
+    otherwise go negative and rank this pattern as LESS stale than a
+    genuinely never-audited one -- the opposite of what "needs review"
+    should mean.
+    """
+    last_reviewed_at = data.get("last_reviewed_at")
+    if not last_reviewed_at:
+        return 9999  # never audited — treat as maximally stale
+    try:
+        reviewed_dt = datetime.fromisoformat(last_reviewed_at)
+        return max((datetime.now(UTC) - reviewed_dt).days, 0)
+    except (ValueError, TypeError):
+        logger.bind(doc_id=doc_id, last_reviewed_at=last_reviewed_at).warning(
+            "Malformed last_reviewed_at, treating as never audited"
+        )
+        return 9999
+
+
 def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
     """
     Returns either:
@@ -51,7 +119,7 @@ def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
             "tier": "provisional" | "confirmed",
             "provenance": "live" | "seeded",
             "under_review": bool,
-            "days_since_last_review": int,
+            "days_since_last_review": int,  # from last_reviewed_at; 9999 when never audited
             "diversity_score": float,
             "failure_count": int,
         }
@@ -82,7 +150,7 @@ def enrich(alert: dict[str, Any], firestore_client: Client) -> dict[str, Any]:
         "tier": data.get("tier", "provisional"),
         "provenance": data.get("provenance", "live"),
         "under_review": data.get("under_review", False),
-        "days_since_last_review": data.get("days_since_last_review", 0),
+        "days_since_last_review": days_since_last_review(data, doc_id=doc_ref.id),
         "diversity_score": data.get("diversity_score", 0.0),
         "failure_count": data.get("failure_count", 0),
     }
@@ -129,11 +197,13 @@ def record_confirmed_negative(
     # overwrote instance_id, which silently discarded IDs a caller had
     # already assigned.
     instances.append(
-        {
-            **alert,
-            "instance_id": alert.get("instance_id", str(uuid.uuid4())),
-            "verified_by": "human" if human_confirmed else "bulk",
-        }
+        _restrict_to_allowed_fields(
+            {
+                **alert,
+                "instance_id": alert.get("instance_id", str(uuid.uuid4())),
+                "verified_by": "human" if human_confirmed else "bulk",
+            }
+        )
     )
 
     template = build_structural_template(instances, provenance="live")
@@ -176,11 +246,13 @@ def seed_template(
     the source dataset is.
     """
     seeded_instances = [
-        {
-            **instance,
-            "instance_id": instance.get("instance_id", str(uuid.uuid4())),
-            "verified_by": "bulk",
-        }
+        _restrict_to_allowed_fields(
+            {
+                **instance,
+                "instance_id": instance.get("instance_id", str(uuid.uuid4())),
+                "verified_by": "bulk",
+            }
+        )
         for instance in confirmed_negative_instances
     ]
     template = build_structural_template(seeded_instances, provenance="seeded")

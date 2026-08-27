@@ -94,8 +94,8 @@ def load_instances_from_file(path: Path) -> list[dict[str, Any]]:
             raise SeedInputError(f"{path}[{index}] is not a JSON object")
         try:
             pattern_identity_key(instance)
-        except KeyError as exc:
-            raise SeedInputError(f"{path}[{index}] is missing identity field {exc}") from exc
+        except MalformedAlertError as exc:
+            raise SeedInputError(f"{path}[{index}] is malformed: {exc}") from exc
 
     return raw
 

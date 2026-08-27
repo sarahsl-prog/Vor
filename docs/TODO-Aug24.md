@@ -201,3 +201,16 @@ outstanding-decisions discussion.
   deduplicated. `pytest.ini` is the single source (it won anyway); the dead `pyproject.toml`
   block was removed while adding the `integration` marker, per this note's own instruction to
   do it next time either file was touched.
+
+---
+
+## Outstanding decision — last_reviewed_at staleness (2026-08-26)
+
+- [x] **Decision: leave `days_since_last_review` unbounded, no forced-reaudit
+  threshold.** `select_audit_targets()` uses staleness as a priority signal
+  (older = higher priority) but nothing forces a re-audit past any fixed
+  age. Revisit once real audit volume exists to calibrate an actual
+  threshold — there's no production Hayabusa/EVTX history yet to pick a
+  number against, same gap noted for `GRADUATION_THRESHOLD`/`MIN_DIVERSITY`
+  elsewhere in this project. See `docs/Code-review-Aug25.md` Section 6,
+  decision 5.

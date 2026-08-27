@@ -27,6 +27,7 @@ from vor_agents.orchestrator import (
     SWEEP_MAX_TARGETS_ENV_VAR,
     AgentOutputError,
     _deviation_field_names,
+    _merge_deviations,
     _run_agent,
     audit_pattern,
     classify_alert,
@@ -103,7 +104,9 @@ class TestReconciliation:
             "decision": "ESCALATE",
             "matched_pattern_id": "test",
             "uncertain_reason": "not_applicable",
-            "structural_deviations_found": ["some_field: template=X, observed=Y"],
+            "structural_deviations_found": [
+                {"field": "some_field", "template": "X", "observed": "Y"}
+            ],
             "reasoning": "This looks suspicious for reasons beyond the diffed fields.",
         }
         with patch(
@@ -166,7 +169,9 @@ class TestSelfConsistency:
             "decision": "SUPPRESS",
             "matched_pattern_id": "test",
             "uncertain_reason": "not_applicable",
-            "structural_deviations_found": ["integrity_level: template=Medium, observed=High"],
+            "structural_deviations_found": [
+                {"field": "integrity_level", "template": "Medium", "observed": "High"}
+            ],
             "reasoning": "Reported a deviation but suppressed anyway.",
         }
         with patch(
@@ -189,7 +194,9 @@ class TestSelfConsistency:
             "decision": "ESCALATE",
             "matched_pattern_id": "test",
             "uncertain_reason": "not_applicable",
-            "structural_deviations_found": ["integrity_level: template=Medium, observed=High"],
+            "structural_deviations_found": [
+                {"field": "integrity_level", "template": "Medium", "observed": "High"}
+            ],
             "reasoning": "Deviation found, escalating as instructed.",
         }
         with patch(
@@ -204,27 +211,26 @@ class TestSelfConsistency:
 
 class TestDeviationFieldNames:
     """
-    Regression coverage: a deviation string not following the
-    "field: template=X, observed=Y" format (the model not following its
-    own output rules, or phrasing it differently) used to be treated as a
-    whole-string field name, which can never match a real template field
-    name on either side of the reconciliation diff. Must now be skipped
-    (and logged) instead of silently corrupting the field-name set.
+    Regression coverage: a deviation object missing its "field" key (the
+    model not following its own output schema) used to be impossible to
+    represent under the old free-string format's failure mode (a
+    colon-less string) -- now the equivalent malformed case is a dict
+    with no "field" key. Must be skipped (and logged), not guessed at.
     """
 
-    def test_well_formed_strings_extract_field_name(self):
+    def test_well_formed_objects_extract_field_name(self):
         result = _deviation_field_names(
             [
-                "integrity_level: template=Medium, observed=High",
-                "file_access_mode: template=read, observed=write",
+                {"field": "integrity_level", "template": "Medium", "observed": "High"},
+                {"field": "file_access_mode", "template": "read", "observed": "write"},
             ]
         )
         assert result == {"integrity_level", "file_access_mode"}
 
-    def test_colon_less_string_is_skipped_not_treated_as_field_name(self):
+    def test_object_missing_field_key_is_skipped_not_treated_as_a_field_name(self):
         result = _deviation_field_names(
             [
-                "integrity_level observed High instead of Medium",
+                {"template": "Medium", "observed": "High"},
             ]
         )
         assert result == set()
@@ -232,13 +238,52 @@ class TestDeviationFieldNames:
     def test_mix_of_well_formed_and_malformed_keeps_only_well_formed(self):
         result = _deviation_field_names(
             [
-                "integrity_level: template=Medium, observed=High",
-                "malformed deviation with no colon at all",
-                "",
-                "  ",
+                {"field": "integrity_level", "template": "Medium", "observed": "High"},
+                {"template": "no field key here"},
+                {},
             ]
         )
         assert result == {"integrity_level"}
+
+
+class TestMergeDeviations:
+    """
+    Direct unit coverage for _merge_deviations' de-duplication logic. It's
+    only reached from classify_alert()'s ground-truth-missed override
+    (precomputed_deviations non-empty AND missed_by_model non-empty AND
+    decision==SUPPRESS), and the existing reconciliation test that reaches
+    it always passes an empty list as one of the two groups -- so the
+    actual dedup/merge branch never previously executed under test.
+    """
+
+    def test_identical_deviations_from_different_groups_collapse_to_one(self):
+        dup = {"field": "f", "template": "a", "observed": "b"}
+        result = _merge_deviations([dup], [dict(dup)])
+        assert [d.model_dump() for d in result] == [dup]
+
+    def test_same_field_different_observed_value_both_survive(self):
+        """The dangerous case to get wrong: two deviations sharing a field
+        name but differing in what was actually observed are two distinct,
+        real deviations -- collapsing them into one would silently drop
+        evidence."""
+        first = {"field": "f", "template": "a", "observed": "b"}
+        second = {"field": "f", "template": "a", "observed": "c"}
+        result = _merge_deviations([first], [second])
+        assert len(result) == 2
+        dumped = [d.model_dump() for d in result]
+        assert first in dumped
+        assert second in dumped
+
+    def test_output_ordering_is_deterministic_regardless_of_group_order(self):
+        first = {"field": "f", "template": "a", "observed": "b"}
+        second = {"field": "f", "template": "a", "observed": "c"}
+        result_first_then_second = _merge_deviations([first], [second])
+        result_second_then_first = _merge_deviations([second], [first])
+        assert (
+            [d.model_dump() for d in result_first_then_second]
+            == [d.model_dump() for d in result_second_then_first]
+            == [first, second]
+        )
 
 
 @pytest.mark.asyncio
@@ -874,6 +919,64 @@ class TestRunScheduledSweep:
         assert result == []
 
 
+class TestSweepSurvivesMalformedLastReviewedAt:
+    def test_bad_last_reviewed_at_does_not_crash_the_sweep(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        """Regression for Code-review-Aug25 1.3: a single corrupted
+        last_reviewed_at string used to raise inside
+        datetime.fromisoformat() with no handling, crashing the ENTIRE
+        weekly sweep over one bad doc."""
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        identity_key = pattern_identity_key(diverse_confirmed_instances[0])
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).update(
+            {"last_reviewed_at": "not-a-date"}
+        )
+
+        enqueued = run_scheduled_sweep(fake_firestore, enqueue_audit_fn=lambda k, p: True)
+
+        assert identity_key in enqueued  # still surfaced, not dropped
+
+    def test_malformed_timestamp_in_one_pattern_does_not_prevent_sweep_of_others(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        """Prove that the per-doc try/except isolation actually holds:
+        a malformed last_reviewed_at in ONE pattern must not prevent
+        OTHER, unrelated patterns from being processed by the same sweep."""
+        # First pattern with malformed timestamp
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        first_key = pattern_identity_key(diverse_confirmed_instances[0])
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(first_key)).update(
+            {"last_reviewed_at": "not-a-date"}
+        )
+
+        # Second pattern with different identity key and valid timestamp
+        # Use the same instances but with different detection_rule_id
+        second_instances = [
+            dict(
+                instance,
+                detection_rule_id="Different_Rule",
+                timestamp="2026-08-01T09:00:00Z",
+            )
+            for instance in diverse_confirmed_instances
+        ]
+        for instance in second_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        second_key = pattern_identity_key(second_instances[0])
+        # Explicitly set a valid timestamp (record_confirmed_negative doesn't set one)
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(second_key)).update(
+            {"last_reviewed_at": "2026-08-20T12:00:00Z"}
+        )
+
+        enqueued = run_scheduled_sweep(fake_firestore, enqueue_audit_fn=lambda k, p: True)
+
+        # Both patterns must be enqueued despite the first being malformed
+        assert first_key in enqueued
+        assert second_key in enqueued
+
+
 @pytest.mark.asyncio
 class TestTracingWiring:
     """
@@ -993,6 +1096,26 @@ class TestTracingWiring:
         await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
 
         assert captured["audit_failed"] is True
+
+
+@pytest.mark.asyncio
+class TestAuditFailureReasoningIsBounded:
+    async def test_reasoning_uses_the_truncated_error_repr(self, fake_firestore):
+        """Regression for Code-review-Aug25 2.4: `reasoning` embedded the
+        FULL repr(exc) while last_error_repr (written to needs_attention)
+        was truncated to 500 chars -- an inconsistency that let an
+        unbounded exception repr (request IDs, URLs, stack context) reach
+        MLflow/Firestore via AuditorOutput.reasoning even though the
+        exact same string was being deliberately bounded two lines away."""
+        identity_key = ("rule", "p.exe", "c.exe", "family")
+        long_message = "x" * 2000
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(side_effect=RuntimeError(long_message)),
+        ):
+            result = await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+        assert len(result.reasoning) < 600  # bounded, not ~2000+ chars
 
 
 class TestSweepMaxTargetsIsConfigurable:

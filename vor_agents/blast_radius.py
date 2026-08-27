@@ -109,6 +109,11 @@ def _load_table(firestore_client: Client) -> dict[tuple[str, str], float]:
         return _TABLE_CACHE
 
     try:
+        # One doc per (indicator_type, value) by construction -- doc IDs
+        # are the content hash of exactly that pair (see _table_doc_id),
+        # so a re-commit replaces its own doc rather than adding another.
+        # No "pick the newest committed_at across duplicate docs" step is
+        # needed because duplicates can't exist.
         fresh: dict[tuple[str, str], float] = {}
         for doc in firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).stream():
             data = doc.to_dict() or {}
@@ -157,13 +162,6 @@ def estimate_blast_radius(alert: dict[str, Any], firestore_client: Client) -> fl
     return max(matches) if matches else UNSCORED_DEFAULT
 
 
-def _table_doc_id(indicator_type: str, value: str) -> str:
-    """Content hash, not a raw f-string join -- same collision-avoidance
-    reasoning as enrichment._doc_id() and task_queue._task_name()."""
-    encoded = json.dumps([indicator_type, value], separators=(",", ":"))
-    return hashlib.sha256(encoded.encode()).hexdigest()
-
-
 def _parse_cited_indicator(indicator: str) -> tuple[str, str]:
     """
     cited_indicators entries are "indicator_type=value" strings (e.g.
@@ -181,10 +179,37 @@ def _parse_cited_indicator(indicator: str) -> tuple[str, str]:
     return indicator_type.strip(), value.strip()
 
 
+def _table_doc_id(indicator_type: str, value: str) -> str:
+    """Content hash, not a raw f-string join -- same collision-avoidance
+    reasoning as enrichment._doc_id() and task_queue._task_name()."""
+    encoded = json.dumps([indicator_type, value], separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
 def _commit_indicators(cited_indicators: list[str], score: float, firestore_client: Client) -> None:
-    """Writes each cited indicator into blast_radius_table at the given
-    score, then invalidates the read cache so the next
-    estimate_blast_radius() call sees it without waiting out the TTL."""
+    """
+    Writes each cited indicator into blast_radius_table at the given
+    score, overwriting any prior score for the same (indicator_type,
+    value). doc_id is a content hash, so this write is naturally
+    idempotent -- re-committing the same indicator always targets the
+    same doc.
+
+    Uses a PLAIN overwrite (no merge=True). docs/Code-review-Aug25.md
+    1.2 originally claimed Firestore's set(merge=True) silently keeps a
+    stale score on re-commit because merge doesn't overwrite an existing
+    top-level scalar field. This repo's own review_flag.py disproves that
+    premise for its own use case: clear_under_review() relies on
+    set({"under_review": False, ...}, merge=True) successfully flipping
+    an existing True back to False in production. A plain overwrite is
+    used here anyway -- not because merge=True would be unsafe, but
+    because it's simpler and removes any doubt, and because a prior
+    append-only version of this function (random uuid4 doc IDs, kept
+    forever, full-collection-scanned on every cache refresh on the
+    /classify hot path) traded a bug that doesn't reproduce for an
+    unbounded-growth problem this project's Task 5 (see tracing.py /
+    pending_traces) exists specifically to avoid elsewhere. See the
+    remediation branch's final-review.md finding C-2.
+    """
     for indicator in cited_indicators:
         indicator_type, value = _parse_cited_indicator(indicator)
         doc_id = _table_doc_id(indicator_type, value)
@@ -194,8 +219,7 @@ def _commit_indicators(cited_indicators: list[str], score: float, firestore_clie
                 "value": value,
                 "score": score,
                 "committed_at": datetime.now(UTC).isoformat(),
-            },
-            merge=True,
+            }
         )
     _invalidate_table_cache()
 
