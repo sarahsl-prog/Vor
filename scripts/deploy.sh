@@ -37,6 +37,11 @@
 #   SESSION_DB_USER      -- Cloud SQL database user. Default: vor.
 #   SESSION_DB_PASSWORD  -- Password for SESSION_DB_USER. No default --
 #                           the script exits if this isn't set.
+#   SESSION_DB_URL_SECRET -- Secret Manager secret holding the assembled
+#                           SESSION_DB_URL (which embeds the password).
+#                           Mounted into Cloud Run via --set-secrets rather
+#                           than passed as a plaintext env var.
+#                           Default: vor-session-db-url.
 #
 # Usage:
 #   export GCP_PROJECT=your-project-id
@@ -174,6 +179,11 @@ if [[ -z "${SESSION_DB_PASSWORD:-}" ]]; then
   echo "ERROR: SESSION_DB_PASSWORD must be set (the vor DB user's password)." >&2
   exit 1
 fi
+# NOTE: --password on the command line is briefly visible via `ps` on
+# whatever machine runs this script (see final-review.md C-4). Accepted
+# for now -- a full fix means either an interactive password prompt
+# (breaks automation) or migrating to Cloud SQL IAM database auth
+# (no password at all), both out of scope for this pass.
 _run_idempotent sql users create "${SESSION_DB_USER}" \
   --instance="${SESSION_DB_INSTANCE}" \
   --password="${SESSION_DB_PASSWORD}"
@@ -190,6 +200,26 @@ _run_idempotent projects add-iam-policy-binding "${GCP_PROJECT}" \
   --role "roles/cloudsql.client"
 
 SESSION_DB_URL="postgresql+asyncpg://${SESSION_DB_USER}:${SESSION_DB_PASSWORD}@/${SESSION_DB_NAME}?host=/cloudsql/${INSTANCE_CONNECTION_NAME}"
+
+# SESSION_DB_URL embeds the live DB password, so it goes into Secret
+# Manager and is mounted with --set-secrets below -- NOT into
+# --set-env-vars. Cloud Run env vars are plaintext and readable by anyone
+# with run.services.get (via `gcloud run services describe` or the
+# console). Same rule docs/DEPLOY.md already states for the scheduler
+# credential: that credential goes in Secret Manager / .env, never
+# hardcoded, per CLAUDE.md's secrets rule. See final-review.md C-4.
+: "${SESSION_DB_URL_SECRET:=vor-session-db-url}"
+
+if gcloud secrets describe "${SESSION_DB_URL_SECRET}" >/dev/null 2>&1; then
+  printf '%s' "${SESSION_DB_URL}" | gcloud secrets versions add "${SESSION_DB_URL_SECRET}" --data-file=-
+else
+  printf '%s' "${SESSION_DB_URL}" | gcloud secrets create "${SESSION_DB_URL_SECRET}" \
+    --data-file=- --replication-policy=automatic
+fi
+
+_run_idempotent projects add-iam-policy-binding "${GCP_PROJECT}" \
+  --member "serviceAccount:${CLOUD_RUN_SA}" \
+  --role "roles/secretmanager.secretAccessor"
 
 # db-f1-micro is the smallest/cheapest Cloud SQL tier, matching this
 # project's existing "scale-to-zero, cap runaway spend" cost posture
@@ -211,7 +241,6 @@ ENV_VARS=(
   "GOOGLE_GENAI_USE_VERTEXAI=true"
   "GOOGLE_CLOUD_PROJECT=${GCP_PROJECT}"
   "GOOGLE_CLOUD_LOCATION=${GCP_REGION}"
-  "SESSION_DB_URL=${SESSION_DB_URL}"
 )
 
 # Optional variables are only added when explicitly set.
@@ -238,7 +267,8 @@ ENV_VARS_STRING=$(IFS=,; echo "${ENV_VARS[*]}")
 
 _run_idempotent run services update "${SERVICE_NAME}" \
   --region "${GCP_REGION}" \
-  --set-env-vars "${ENV_VARS_STRING}" || true
+  --set-env-vars "${ENV_VARS_STRING}" \
+  --set-secrets "SESSION_DB_URL=${SESSION_DB_URL_SECRET}:latest" || true
 
 # ---------------------------------------------------------------------------
 # 7. Grant the Cloud Run service account access to Vertex AI.
