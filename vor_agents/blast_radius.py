@@ -13,8 +13,6 @@ something HIGH/CRITICAL is the conservative move and can happen freely;
 scoring it MEDIUM/LOW requires a human to actually commit it.
 """
 
-import hashlib
-import json
 import time
 import uuid
 from datetime import UTC, datetime
@@ -110,6 +108,11 @@ def _load_table(firestore_client: Client) -> dict[tuple[str, str], float]:
 
     try:
         fresh: dict[tuple[str, str], float] = {}
+        # (indicator_type, value) -> the committed_at of the entry
+        # currently winning for that key, so a later doc with an OLDER
+        # committed_at (arbitrary Firestore stream order) never
+        # clobbers a newer one already seen.
+        newest_seen: dict[tuple[str, str], datetime] = {}
         for doc in firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).stream():
             data = doc.to_dict() or {}
             indicator_type = data.get("indicator_type")
@@ -120,7 +123,25 @@ def _load_table(firestore_client: Client) -> dict[tuple[str, str], float]:
                     "blast_radius_table doc missing indicator_type/value/score, skipping"
                 )
                 continue
-            fresh[(indicator_type, value)] = score
+            key = (indicator_type, value)
+
+            committed_at_raw = data.get("committed_at")
+            try:
+                if not isinstance(committed_at_raw, str):
+                    raise TypeError("committed_at is not a string")
+                committed_at = datetime.fromisoformat(committed_at_raw)
+            except (TypeError, ValueError):
+                # Malformed/missing committed_at -- treat as the oldest
+                # possible entry so any doc WITH a valid timestamp always
+                # wins over it, but it still populates the table if it's
+                # the only entry for this key (degrade gracefully, same
+                # posture as every other malformed-timestamp handling in
+                # this project -- see orchestrator._fetch_all_confirmed_patterns).
+                committed_at = datetime.min.replace(tzinfo=UTC)
+
+            if key not in newest_seen or committed_at >= newest_seen[key]:
+                newest_seen[key] = committed_at
+                fresh[key] = score
         _TABLE_CACHE = fresh
         _TABLE_CACHE_LOADED_AT = now
         return _TABLE_CACHE
@@ -157,13 +178,6 @@ def estimate_blast_radius(alert: dict[str, Any], firestore_client: Client) -> fl
     return max(matches) if matches else UNSCORED_DEFAULT
 
 
-def _table_doc_id(indicator_type: str, value: str) -> str:
-    """Content hash, not a raw f-string join -- same collision-avoidance
-    reasoning as enrichment._doc_id() and task_queue._task_name()."""
-    encoded = json.dumps([indicator_type, value], separators=(",", ":"))
-    return hashlib.sha256(encoded.encode()).hexdigest()
-
-
 def _parse_cited_indicator(indicator: str) -> tuple[str, str]:
     """
     cited_indicators entries are "indicator_type=value" strings (e.g.
@@ -182,20 +196,31 @@ def _parse_cited_indicator(indicator: str) -> tuple[str, str]:
 
 
 def _commit_indicators(cited_indicators: list[str], score: float, firestore_client: Client) -> None:
-    """Writes each cited indicator into blast_radius_table at the given
-    score, then invalidates the read cache so the next
-    estimate_blast_radius() call sees it without waiting out the TTL."""
+    """
+    Writes each cited indicator as a NEW, timestamped doc in
+    blast_radius_table -- never overwrites or merges into an existing
+    doc. This is deliberate: `set(merge=True)` on a content-hash doc ID
+    (the old scheme) silently kept a STALE score on re-commit, because
+    Firestore's merge=True does not overwrite an existing top-level
+    scalar field -- see docs/Code-review-Aug25.md 1.2. Append-only also
+    gives a free audit trail: every score this indicator has ever been
+    assigned is a readable doc, not just the latest.
+
+    doc_id is a random uuid4, not a content hash of (indicator_type,
+    value) -- a content hash would map every commit for the same
+    indicator back onto the SAME doc, defeating the append-only design
+    by definition. _load_table() is responsible for picking the winner
+    (latest committed_at) across every doc for a given indicator.
+    """
     for indicator in cited_indicators:
         indicator_type, value = _parse_cited_indicator(indicator)
-        doc_id = _table_doc_id(indicator_type, value)
-        firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).document(doc_id).set(
+        firestore_client.collection(BLAST_RADIUS_TABLE_COLLECTION).document(str(uuid.uuid4())).set(
             {
                 "indicator_type": indicator_type,
                 "value": value,
                 "score": score,
                 "committed_at": datetime.now(UTC).isoformat(),
-            },
-            merge=True,
+            }
         )
     _invalidate_table_cache()
 

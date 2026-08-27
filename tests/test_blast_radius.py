@@ -111,6 +111,37 @@ class TestEstimateBlastRadiusFromFirestore:
 
         assert result == 0.95  # still the cached value, not the mutated one
 
+    def test_recommitting_same_indicator_with_a_new_score_wins(self, fake_firestore):
+        """Regression for Code-review-Aug25 1.2: set(merge=True) on a
+        content-hash doc ID silently kept the OLD score on a re-commit
+        because Firestore merge doesn't overwrite an existing top-level
+        scalar field. _commit_indicators now writes a new, timestamped
+        doc per commit; _load_table must resolve the latest one."""
+        from vor_agents.blast_radius import _commit_indicators
+
+        _commit_indicators(["parent_image=lsass.exe"], 0.95, fake_firestore)
+        reset_table_cache()
+        first = estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)
+        assert first == 0.95
+
+        _commit_indicators(["parent_image=lsass.exe"], 0.30, fake_firestore)
+        reset_table_cache()
+        second = estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)
+        assert second == 0.30  # the new score must win, not the stale 0.95
+
+    def test_recommit_preserves_history_does_not_delete_old_entries(self, fake_firestore):
+        """The whole point of append-only: the prior score is still a
+        readable doc in blast_radius_table after a re-commit, not
+        overwritten or deleted -- an auditor can reconstruct history."""
+        from vor_agents.blast_radius import _commit_indicators
+
+        _commit_indicators(["parent_image=lsass.exe"], 0.95, fake_firestore)
+        _commit_indicators(["parent_image=lsass.exe"], 0.30, fake_firestore)
+
+        docs = list(fake_firestore.collection(BLAST_RADIUS_TABLE_COLLECTION).stream())
+        scores = sorted(d.to_dict()["score"] for d in docs)
+        assert scores == [0.30, 0.95]
+
     def test_stale_cache_served_on_refresh_failure(self, fake_firestore, monkeypatch):
         self._seed_entry(fake_firestore, "parent_image", "lsass.exe", 0.95)
         estimate_blast_radius({"parent_image": "lsass.exe"}, fake_firestore)  # populates cache
