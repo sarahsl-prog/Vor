@@ -1053,6 +1053,26 @@ class TestTracingWiring:
         assert captured["audit_failed"] is True
 
 
+@pytest.mark.asyncio
+class TestAuditFailureReasoningIsBounded:
+    async def test_reasoning_uses_the_truncated_error_repr(self, fake_firestore):
+        """Regression for Code-review-Aug25 2.4: `reasoning` embedded the
+        FULL repr(exc) while last_error_repr (written to needs_attention)
+        was truncated to 500 chars -- an inconsistency that let an
+        unbounded exception repr (request IDs, URLs, stack context) reach
+        MLflow/Firestore via AuditorOutput.reasoning even though the
+        exact same string was being deliberately bounded two lines away."""
+        identity_key = ("rule", "p.exe", "c.exe", "family")
+        long_message = "x" * 2000
+        with patch(
+            "vor_agents.orchestrator._run_agent",
+            new=AsyncMock(side_effect=RuntimeError(long_message)),
+        ):
+            result = await audit_pattern(identity_key, {"triggered_by": "test"}, fake_firestore)
+
+        assert len(result.reasoning) < 600  # bounded, not ~2000+ chars
+
+
 class TestSweepMaxTargetsIsConfigurable:
     """
     $SWEEP_MAX_TARGETS caps how many patterns one sweep enqueues audits

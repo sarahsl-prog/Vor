@@ -495,7 +495,7 @@ async def audit_pattern(
         logger.bind(identity_key=identity_key).exception("Audit failed")
         decision = AuditorOutput(
             action=AuditorAction.NO_ACTION,
-            reasoning=f"Audit failed with error: {exc!r}",
+            reasoning=f"Audit failed with error: {last_error_repr}",
         )
     finally:
         new_failure_count = clear_under_review(
