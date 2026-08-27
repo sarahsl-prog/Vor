@@ -649,17 +649,28 @@ def _fetch_all_confirmed_patterns(firestore_client: Client) -> list[dict[str, An
 
         last_reviewed_at = data.get("last_reviewed_at")
         if last_reviewed_at:
-            reviewed_dt = datetime.fromisoformat(last_reviewed_at)
-            # Clamped to >= 0: a last_reviewed_at in the future (clock
-            # skew between whatever wrote it and this read) would
-            # otherwise go negative and make select_audit_targets() rank
-            # this pattern BELOW patterns that are genuinely never-
-            # audited — the opposite of what "needs review" should mean.
-            # select_audit_targets() clamps too (defense in depth for
-            # direct callers of that function), but the sentinel-value
-            # comment below only makes sense if this is never negative to
-            # begin with.
-            days_since = max((datetime.now(UTC) - reviewed_dt).days, 0)
+            try:
+                reviewed_dt = datetime.fromisoformat(last_reviewed_at)
+                # Clamped to >= 0: a last_reviewed_at in the future (clock
+                # skew between whatever wrote it and this read) would
+                # otherwise go negative and make select_audit_targets() rank
+                # this pattern BELOW patterns that are genuinely never-
+                # audited — the opposite of what "needs review" should mean.
+                # select_audit_targets() clamps too (defense in depth for
+                # direct callers of that function), but the sentinel-value
+                # comment below only makes sense if this is never negative to
+                # begin with.
+                days_since = max((datetime.now(UTC) - reviewed_dt).days, 0)
+            except (ValueError, TypeError):
+                # A single corrupted timestamp must never take down the
+                # whole sweep -- see docs/Code-review-Aug25.md 1.3. Treat
+                # it the same as never-audited (the maximally-stale
+                # sentinel below) so it still gets surfaced for review
+                # rather than silently skipped.
+                logger.bind(doc_id=doc.id, last_reviewed_at=last_reviewed_at).warning(
+                    "Malformed last_reviewed_at, treating pattern as never audited"
+                )
+                days_since = 9999
         else:
             days_since = 9999  # never audited — treat as maximally stale
 

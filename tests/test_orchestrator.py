@@ -874,6 +874,26 @@ class TestRunScheduledSweep:
         assert result == []
 
 
+class TestSweepSurvivesMalformedLastReviewedAt:
+    def test_bad_last_reviewed_at_does_not_crash_the_sweep(
+        self, fake_firestore, diverse_confirmed_instances
+    ):
+        """Regression for Code-review-Aug25 1.3: a single corrupted
+        last_reviewed_at string used to raise inside
+        datetime.fromisoformat() with no handling, crashing the ENTIRE
+        weekly sweep over one bad doc."""
+        for instance in diverse_confirmed_instances:
+            record_confirmed_negative(instance, fake_firestore)
+        identity_key = pattern_identity_key(diverse_confirmed_instances[0])
+        fake_firestore.collection(CONFIDENCE_COLLECTION).document(_doc_id(identity_key)).update(
+            {"last_reviewed_at": "not-a-date"}
+        )
+
+        enqueued = run_scheduled_sweep(fake_firestore, enqueue_audit_fn=lambda k, p: True)
+
+        assert identity_key in enqueued  # still surfaced, not dropped
+
+
 @pytest.mark.asyncio
 class TestTracingWiring:
     """
