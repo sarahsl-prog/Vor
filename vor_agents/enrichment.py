@@ -15,7 +15,12 @@ from typing import Any
 from google.cloud.firestore import Client
 from loguru import logger
 
-from .identity import DIFFABLE_FIELDS, build_structural_template, pattern_identity_key
+from .identity import (
+    DIFFABLE_FIELDS,
+    IDENTITY_KEY_FIELDS,
+    build_structural_template,
+    pattern_identity_key,
+)
 
 CONFIDENCE_COLLECTION = "confidence_docs"
 
@@ -27,9 +32,15 @@ CONFIDENCE_COLLECTION = "confidence_docs"
 # deterministic diffing logic needs; the rest are bookkeeping fields
 # written by this module itself (instance_id, verified_by) or used by
 # evidence_diversity_score (host, user, timestamp).
-_IDENTITY_FIELDS = ("detection_rule_id", "parent_image", "child_image", "endpoint_family")
+#
+# IDENTITY_KEY_FIELDS is imported from identity.py rather than restated
+# here: this module used to hand-duplicate the same 4-tuple, and if the
+# two ever drifted, this allow-list would silently strip whichever field
+# identity.py had gained, making pattern_identity_key(stored_instance)
+# raise "malformed instance" on every doc with no hint that a stale
+# allow-list was the real cause. See final-review.md C-5.
 CONFIRMED_INSTANCE_ALLOWED_FIELDS = frozenset(
-    _IDENTITY_FIELDS
+    IDENTITY_KEY_FIELDS
     + tuple(DIFFABLE_FIELDS)
     + ("host", "user", "timestamp", "instance_id", "verified_by")
 )
