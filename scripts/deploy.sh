@@ -31,6 +31,12 @@
 #   MLFLOW_EXPERIMENT_NAME -- Optional MLflow experiment name.
 #   SWEEP_MAX_TARGETS    -- Optional sweep target cap.
 #   BLAST_RADIUS_CACHE_TTL_SECONDS -- Optional blast-radius cache TTL.
+#   SESSION_DB_INSTANCE  -- Cloud SQL instance name for session persistence.
+#                           Default: vor-sessions.
+#   SESSION_DB_NAME      -- Cloud SQL database name. Default: vor_sessions.
+#   SESSION_DB_USER      -- Cloud SQL database user. Default: vor.
+#   SESSION_DB_PASSWORD  -- Password for SESSION_DB_USER. No default --
+#                           the script exits if this isn't set.
 #
 # Usage:
 #   export GCP_PROJECT=your-project-id
@@ -90,7 +96,7 @@ _run_idempotent() {
 # ---------------------------------------------------------------------------
 # 1. Build and deploy the Cloud Run service.
 # ---------------------------------------------------------------------------
-echo "[1/10] Deploying Cloud Run service ${SERVICE_NAME}..."
+echo "[1/11] Deploying Cloud Run service ${SERVICE_NAME}..."
 _run_idempotent run deploy "${SERVICE_NAME}" \
   --source . \
   --region "${GCP_REGION}" \
@@ -104,7 +110,7 @@ _run_idempotent run deploy "${SERVICE_NAME}" \
 # 2. Resolve SERVICE_URL if not provided.
 # ---------------------------------------------------------------------------
 if [[ -z "${SERVICE_URL:-}" ]]; then
-  echo "[2/10] SERVICE_URL not set; looking up Cloud Run service URL..."
+  echo "[2/11] SERVICE_URL not set; looking up Cloud Run service URL..."
   SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
     --region "${GCP_REGION}" \
     --format 'value(status.url)')
@@ -120,7 +126,7 @@ echo "Service URL: ${SERVICE_URL}"
 # ---------------------------------------------------------------------------
 # 3. Create the scheduler service account.
 # ---------------------------------------------------------------------------
-echo "[3/10] Ensuring scheduler/invoker service account ${SCHEDULER_SA_EMAIL}..."
+echo "[3/11] Ensuring scheduler/invoker service account ${SCHEDULER_SA_EMAIL}..."
 _run_idempotent iam service-accounts create "${SCHEDULER_SA}" \
   --display-name "Vör Cloud Scheduler invoker" || true
 
@@ -135,7 +141,7 @@ _run_idempotent run services add-iam-policy-binding "${SERVICE_NAME}" \
 # ---------------------------------------------------------------------------
 # 4. Cloud Tasks queue + IAM.
 # ---------------------------------------------------------------------------
-echo "[4/10] Ensuring Cloud Tasks queue ${TASKS_QUEUE}..."
+echo "[4/11] Ensuring Cloud Tasks queue ${TASKS_QUEUE}..."
 _run_idempotent tasks queues create "${TASKS_QUEUE}" \
   --location "${GCP_REGION}" \
   --max-attempts 5 \
@@ -149,9 +155,52 @@ _run_idempotent tasks queues add-iam-policy-binding "${TASKS_QUEUE}" \
   --role "roles/cloudtasks.enqueuer" || true
 
 # ---------------------------------------------------------------------------
-# 5. Set environment variables on the Cloud Run service.
+# 5. Cloud SQL instance + database for session persistence.
 # ---------------------------------------------------------------------------
-echo "[5/10] Updating Cloud Run environment variables..."
+: "${SESSION_DB_INSTANCE:=vor-sessions}"
+: "${SESSION_DB_NAME:=vor_sessions}"
+: "${SESSION_DB_USER:=vor}"
+
+echo "[5/11] Ensuring Cloud SQL instance ${SESSION_DB_INSTANCE} exists..."
+_run_idempotent sql instances create "${SESSION_DB_INSTANCE}" \
+  --database-version=POSTGRES_16 \
+  --tier=db-f1-micro \
+  --region="${GCP_REGION}"
+
+_run_idempotent sql databases create "${SESSION_DB_NAME}" \
+  --instance="${SESSION_DB_INSTANCE}"
+
+if [[ -z "${SESSION_DB_PASSWORD:-}" ]]; then
+  echo "ERROR: SESSION_DB_PASSWORD must be set (the vor DB user's password)." >&2
+  exit 1
+fi
+_run_idempotent sql users create "${SESSION_DB_USER}" \
+  --instance="${SESSION_DB_INSTANCE}" \
+  --password="${SESSION_DB_PASSWORD}"
+
+INSTANCE_CONNECTION_NAME=$(gcloud sql instances describe "${SESSION_DB_INSTANCE}" \
+  --format='value(connectionName)')
+
+_run_idempotent run services update "${SERVICE_NAME}" \
+  --region "${GCP_REGION}" \
+  --add-cloudsql-instances "${INSTANCE_CONNECTION_NAME}"
+
+_run_idempotent projects add-iam-policy-binding "${GCP_PROJECT}" \
+  --member "serviceAccount:${CLOUD_RUN_SA}" \
+  --role "roles/cloudsql.client"
+
+SESSION_DB_URL="postgresql+asyncpg://${SESSION_DB_USER}:${SESSION_DB_PASSWORD}@/${SESSION_DB_NAME}?host=/cloudsql/${INSTANCE_CONNECTION_NAME}"
+
+# db-f1-micro is the smallest/cheapest Cloud SQL tier, matching this
+# project's existing "scale-to-zero, cap runaway spend" cost posture
+# (--min-instances 0, --max-instances 3 above) -- an unvalidated starting
+# point, same posture as every other capacity default in this project.
+# Revisit once real traffic volume exists.
+
+# ---------------------------------------------------------------------------
+# 6. Set environment variables on the Cloud Run service.
+# ---------------------------------------------------------------------------
+echo "[6/11] Updating Cloud Run environment variables..."
 
 ENV_VARS=(
   "GCP_PROJECT=${GCP_PROJECT}"
@@ -162,6 +211,7 @@ ENV_VARS=(
   "GOOGLE_GENAI_USE_VERTEXAI=true"
   "GOOGLE_CLOUD_PROJECT=${GCP_PROJECT}"
   "GOOGLE_CLOUD_LOCATION=${GCP_REGION}"
+  "SESSION_DB_URL=${SESSION_DB_URL}"
 )
 
 # Optional variables are only added when explicitly set.
@@ -191,17 +241,17 @@ _run_idempotent run services update "${SERVICE_NAME}" \
   --set-env-vars "${ENV_VARS_STRING}" || true
 
 # ---------------------------------------------------------------------------
-# 6. Grant the Cloud Run service account access to Vertex AI.
+# 7. Grant the Cloud Run service account access to Vertex AI.
 # ---------------------------------------------------------------------------
-echo "[6/10] Granting roles/aiplatform.user to ${CLOUD_RUN_SA}..."
+echo "[7/11] Granting roles/aiplatform.user to ${CLOUD_RUN_SA}..."
 _run_idempotent projects add-iam-policy-binding "${GCP_PROJECT}" \
   --member "serviceAccount:${CLOUD_RUN_SA}" \
   --role "roles/aiplatform.user" || true
 
 # ---------------------------------------------------------------------------
-# 7. Cloud Scheduler jobs for /sweep and /replay-traces.
+# 8. Cloud Scheduler jobs for /sweep and /replay-traces.
 # ---------------------------------------------------------------------------
-echo "[7/10] Ensuring Cloud Scheduler jobs..."
+echo "[8/11] Ensuring Cloud Scheduler jobs..."
 
 _run_idempotent scheduler jobs create http "vor-weekly-sweep" \
   --location "${GCP_REGION}" \
@@ -220,9 +270,9 @@ _run_idempotent scheduler jobs create http "vor-trace-replay" \
   --oidc-token-audience "${SERVICE_URL}" || true
 
 # ---------------------------------------------------------------------------
-# 8. Pub/Sub topic + push subscription for /classify.
+# 9. Pub/Sub topic + push subscription for /classify.
 # ---------------------------------------------------------------------------
-echo "[8/10] Ensuring Pub/Sub topic and subscription..."
+echo "[9/11] Ensuring Pub/Sub topic and subscription..."
 _run_idempotent pubsub topics create "${PUBSUB_TOPIC}" || true
 
 _run_idempotent pubsub subscriptions create "${PUBSUB_SUBSCRIPTION}" \
@@ -232,16 +282,16 @@ _run_idempotent pubsub subscriptions create "${PUBSUB_SUBSCRIPTION}" \
   --ack-deadline 600 || true
 
 # ---------------------------------------------------------------------------
-# 9. Set a Firestore TTL policy on pending_traces.queued_at.
+# 10. Set a Firestore TTL policy on pending_traces.queued_at.
 # ---------------------------------------------------------------------------
-echo "[9/10] Setting TTL policy on pending_traces.queued_at..."
+echo "[10/11] Setting TTL policy on pending_traces.queued_at..."
 _run_idempotent firestore fields ttls update queued_at \
   --collection-group=pending_traces \
   --enable-ttl \
   --database="${FIRESTORE_DATABASE}"
 
 # ---------------------------------------------------------------------------
-# 10. Summary.
+# 11. Summary.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Deployment complete ==="

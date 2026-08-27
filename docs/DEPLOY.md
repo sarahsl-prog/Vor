@@ -105,6 +105,7 @@ you want:
 | `MLFLOW_EXPERIMENT_NAME` | MLflow's `Default` experiment | Always, on a shared tracking server — otherwise dev/staging/prod traces are indistinguishable after the fact. |
 | `SWEEP_MAX_TARGETS` | `10` | Tuning how much the weekly sweep costs. Every target is a model call, so this is the sweep's cost/coverage dial. Minimum 1; `0` is **rejected**, not honored — it would disable the safety-net audit path while looking like a sweep that found nothing. |
 | `BLAST_RADIUS_CACHE_TTL_SECONDS` | `300` | Trading Firestore reads against how fast a committed blast-radius entry goes live. `0` means never serve from cache. |
+| `SESSION_DB_URL` | In-memory SQLite (`vor_agents/session_config.py`) | Deploying to Cloud Run — set it to the Cloud SQL Postgres connection string `scripts/deploy.sh` builds (see section 3f below). |
 | `TRACE_REPLAY_BATCH_SIZE` | `1000` | Capping how many `pending_traces` docs one scheduled replay run reads into memory. Every 15 minutes (see MLflow tracing section below) this many docs get materialized at once, so this is the replay run's memory dial. Minimum 1; a value below that is rejected and the default is used. |
 
 `SWEEP_MAX_TARGETS` and `BLAST_RADIUS_CACHE_TTL_SECONDS` are integers. A value
@@ -206,6 +207,33 @@ or too uniform) will not autonomously suppress. Everything seeded this way
 is marked provenance `seeded` / `verified_by: bulk`, because no human
 signed off on the instances individually. See `docs/DATASET_RUNBOOK.md`
 for the file format and for seeding synthetic cases instead.
+
+## 3f. Cloud SQL for session persistence
+
+The ADK Runner needs a `SessionService` to track in-flight conversation
+state during a single classify/audit call. Vör uses ADK's
+`DatabaseSessionService`, backed by Cloud SQL for Postgres in production
+(an in-memory SQLite database is used automatically when `SESSION_DB_URL`
+is unset — that's what local dev and the test suite run against; see
+`vor_agents/session_config.py`).
+
+`scripts/deploy.sh` provisions the Cloud SQL instance, database, and DB
+user, wires the Cloud Run service to it via `--add-cloudsql-instances`
+(a Unix-socket connection through the built-in Cloud SQL proxy sidecar,
+not a public IP), and grants the Cloud Run service account
+`roles/cloudsql.client`. Set `SESSION_DB_PASSWORD` before running it —
+there's no default, and the script refuses to run without one.
+
+Every session created by `_run_agent()` is deleted again in the same
+request's `finally` block (see `orchestrator._discard_session`) — nothing
+here changes that lifecycle. What changes is durability: a Cloud Run
+instance recycled mid-request (autoscaling, deploy, OOM) no longer
+silently drops session state that lived only in that instance's heap.
+
+Tier is `db-f1-micro`, the smallest/cheapest Cloud SQL option — an
+unvalidated starting point, same posture as every other capacity default
+in this project (`SWEEP_MAX_TARGETS`, the Cloud Tasks retry backoff).
+Revisit once real traffic volume exists.
 
 ## 4. Wire /classify to a Pub/Sub push subscription
 

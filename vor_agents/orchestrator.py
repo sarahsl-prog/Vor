@@ -13,7 +13,6 @@ from typing import Any
 
 from google.adk.agents import Agent
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
 from google.cloud.firestore import Client
 from google.genai.types import Content, Part
 from loguru import logger
@@ -40,11 +39,12 @@ from .schemas import (
     Decision,
     UncertainReason,
 )
+from .session_config import build_session_service
 from .tracing import log_audit_trace, log_classification_trace
 
-session_service = InMemorySessionService()  # swap for a persistent
-# SessionService in production;
-# fine for a hackathon demo
+session_service = build_session_service()  # see session_config.py --
+# DatabaseSessionService, backed by Cloud SQL in production and an
+# in-memory SQLite database locally/in tests.
 
 DEFAULT_SWEEP_MAX_TARGETS = 10
 SWEEP_MAX_TARGETS_ENV_VAR = "SWEEP_MAX_TARGETS"
