@@ -569,7 +569,9 @@ def _escalate_result():
         decision=Decision.ESCALATE,
         matched_pattern_id="test",
         uncertain_reason=UncertainReason.NOT_APPLICABLE,
-        structural_deviations_found=["integrity_level"],
+        structural_deviations_found=[
+            {"field": "integrity_level", "template": "Medium", "observed": "High"}
+        ],
         reasoning="structural deviation found",
     )
 

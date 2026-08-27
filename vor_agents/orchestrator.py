@@ -177,36 +177,50 @@ async def _run_agent(agent: Agent, prompt_text: str, session_id: str) -> dict[st
         ) from exc
 
 
-def _deviation_field_names(deviation_strings: list[str]) -> set[str]:
+def _deviation_field_names(deviations: list[dict[str, Any]]) -> set[str]:
     """
-    Extracts just the field name from each deviation string (format:
-    "field_name: template=X, observed=Y" — see diff_alert_against_template()
-    and the schema description for structural_deviations_found). Comparing
-    by field name rather than exact string match is deliberate: the model
-    is asked to follow this format but isn't guaranteed to phrase the
-    template/observed values identically to the Python-computed version
-    (repr formatting, quoting, etc.) — field name is the part that actually
-    matters for reconciliation, not incidental text differences.
+    Extracts just the field name from each structured deviation object
+    (format: {"field": ..., "template": ..., "observed": ...} — see
+    diff_alert_against_template() and ClassifierOutput.structural_deviations_found's
+    schema description). Comparing by field name rather than the full
+    object is deliberate: the model is asked to follow this schema but
+    isn't guaranteed to serialize template/observed identically to the
+    Python-computed version (type coercion, formatting) — field name is
+    the part that actually matters for reconciliation.
 
-    A string with no colon (the model not following the format at all,
-    e.g. "integrity_level observed High instead of Medium") previously got
-    treated as a whole-string field name, which can't match a real
-    template field and would never be found equal to anything on either
-    side of the reconciliation diff in classify_alert(). That's silently
-    fragile in the dangerous direction: it can make a real deviation look
-    unreported ("missed_by_model") when the model actually did report it,
-    just not in the expected format — skip and log instead of guessing.
+    A dict missing the "field" key (the model not following its own
+    output schema) is skipped and logged rather than guessed at — same
+    "when in doubt, don't silently corrupt the comparison" posture as
+    every other malformed-model-output handling in this module. This can
+    only make a real deviation look unreported, never the reverse, which
+    is the safe direction to fail in (see the ground-truth reconciliation
+    block below, which treats "unreported" as the dangerous case to catch).
     """
     parsed = set()
-    for d in deviation_strings:
-        d = d.strip()
-        if not d:
+    for d in deviations:
+        field = d.get("field") if isinstance(d, dict) else None
+        if not field:
+            logger.warning("Deviation object missing a 'field' key: {}", d)
             continue
-        if ":" not in d:
-            logger.warning("Deviation string missing expected 'field:' prefix: {}", d)
-            continue
-        parsed.add(d.split(":", 1)[0].strip())
+        parsed.add(field)
     return parsed
+
+
+def _merge_deviations(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Merges deviation-object lists with de-duplication, replacing the old
+    `sorted(set(a) | set(b))` now that a deviation is a dict (unhashable).
+    Dedup key is the JSON-serialized object (sorted keys) so two
+    structurally-identical deviations from different sources (ground
+    truth vs. model) collapse into one; sorted by that same key for
+    deterministic output ordering, matching the old sorted-set behavior.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        for deviation in group:
+            key = json.dumps(deviation, sort_keys=True, default=str)
+            seen[key] = deviation
+    return [seen[key] for key in sorted(seen)]
 
 
 async def classify_alert(
@@ -378,9 +392,8 @@ async def classify_alert(
             classifier_output = classifier_output.model_copy(
                 update={
                     "decision": "ESCALATE",
-                    "structural_deviations_found": sorted(
-                        set(classifier_output.structural_deviations_found)
-                        | set(precomputed_deviations)
+                    "structural_deviations_found": _merge_deviations(
+                        classifier_output.structural_deviations_found, precomputed_deviations
                     ),
                     "reasoning": (
                         classifier_output.reasoning

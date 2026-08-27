@@ -103,7 +103,9 @@ class TestReconciliation:
             "decision": "ESCALATE",
             "matched_pattern_id": "test",
             "uncertain_reason": "not_applicable",
-            "structural_deviations_found": ["some_field: template=X, observed=Y"],
+            "structural_deviations_found": [
+                {"field": "some_field", "template": "X", "observed": "Y"}
+            ],
             "reasoning": "This looks suspicious for reasons beyond the diffed fields.",
         }
         with patch(
@@ -166,7 +168,9 @@ class TestSelfConsistency:
             "decision": "SUPPRESS",
             "matched_pattern_id": "test",
             "uncertain_reason": "not_applicable",
-            "structural_deviations_found": ["integrity_level: template=Medium, observed=High"],
+            "structural_deviations_found": [
+                {"field": "integrity_level", "template": "Medium", "observed": "High"}
+            ],
             "reasoning": "Reported a deviation but suppressed anyway.",
         }
         with patch(
@@ -189,7 +193,9 @@ class TestSelfConsistency:
             "decision": "ESCALATE",
             "matched_pattern_id": "test",
             "uncertain_reason": "not_applicable",
-            "structural_deviations_found": ["integrity_level: template=Medium, observed=High"],
+            "structural_deviations_found": [
+                {"field": "integrity_level", "template": "Medium", "observed": "High"}
+            ],
             "reasoning": "Deviation found, escalating as instructed.",
         }
         with patch(
@@ -204,27 +210,26 @@ class TestSelfConsistency:
 
 class TestDeviationFieldNames:
     """
-    Regression coverage: a deviation string not following the
-    "field: template=X, observed=Y" format (the model not following its
-    own output rules, or phrasing it differently) used to be treated as a
-    whole-string field name, which can never match a real template field
-    name on either side of the reconciliation diff. Must now be skipped
-    (and logged) instead of silently corrupting the field-name set.
+    Regression coverage: a deviation object missing its "field" key (the
+    model not following its own output schema) used to be impossible to
+    represent under the old free-string format's failure mode (a
+    colon-less string) -- now the equivalent malformed case is a dict
+    with no "field" key. Must be skipped (and logged), not guessed at.
     """
 
-    def test_well_formed_strings_extract_field_name(self):
+    def test_well_formed_objects_extract_field_name(self):
         result = _deviation_field_names(
             [
-                "integrity_level: template=Medium, observed=High",
-                "file_access_mode: template=read, observed=write",
+                {"field": "integrity_level", "template": "Medium", "observed": "High"},
+                {"field": "file_access_mode", "template": "read", "observed": "write"},
             ]
         )
         assert result == {"integrity_level", "file_access_mode"}
 
-    def test_colon_less_string_is_skipped_not_treated_as_field_name(self):
+    def test_object_missing_field_key_is_skipped_not_treated_as_a_field_name(self):
         result = _deviation_field_names(
             [
-                "integrity_level observed High instead of Medium",
+                {"template": "Medium", "observed": "High"},
             ]
         )
         assert result == set()
@@ -232,10 +237,9 @@ class TestDeviationFieldNames:
     def test_mix_of_well_formed_and_malformed_keeps_only_well_formed(self):
         result = _deviation_field_names(
             [
-                "integrity_level: template=Medium, observed=High",
-                "malformed deviation with no colon at all",
-                "",
-                "  ",
+                {"field": "integrity_level", "template": "Medium", "observed": "High"},
+                {"template": "no field key here"},
+                {},
             ]
         )
         assert result == {"integrity_level"}

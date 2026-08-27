@@ -39,10 +39,12 @@ class ClassifierOutput(BaseModel):
         default=UncertainReason.NOT_APPLICABLE,
         description="Only meaningful when decision is UNCERTAIN",
     )
-    structural_deviations_found: list[str] = Field(
+    structural_deviations_found: list[dict[str, Any]] = Field(
         default_factory=list,
         description="EXHAUSTIVE list — every field-level mismatch found, "
-        "not just the first. Format: 'field_name: template=X, observed=Y'.",
+        "not just the first. Each item is an object: "
+        '{"field": <field name>, "template": <expected value>, '
+        '"observed": <value on this alert>}.',
     )
     reasoning: str
 
