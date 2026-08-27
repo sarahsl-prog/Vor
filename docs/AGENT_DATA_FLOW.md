@@ -100,8 +100,11 @@ flowchart TD
 
 ## Status
 
-Solid edges (Pub/Sub trigger, Cloud Tasks enqueue/dispatch, both agent
-calls, `confidence_docs` reads/writes) are implemented and tested today.
-`needs_attention` and the MLflow tracing branch are specced and planned
-(`docs/superpowers/specs/`, `docs/superpowers/plans/`) but not yet built —
-see `docs/TODO-Aug24.md` for current status.
+Every edge in this diagram is implemented and tested: the Pub/Sub
+trigger, Cloud Tasks enqueue/dispatch, both agent calls, `confidence_docs`
+reads/writes, `needs_attention` escalation (`review_flag.py`,
+`orchestrator.py`'s `AUDIT_FAILURE_ESCALATION_THRESHOLD` path), and the
+MLflow tracing fallback/replay branch (`vor_agents/tracing.py`,
+`POST /replay-traces` in `main.py`). See `docs/TODO-Aug24.md` for the
+handful of remaining non-flow gaps (real-API smoke tests, dead-letter
+topic config) that don't change this diagram.

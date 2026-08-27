@@ -180,7 +180,7 @@ values.
 | [`docs/TESTING_PLAN.md`](docs/TESTING_PLAN.md) | What's tested where, and what deliberately isn't |
 | [`docs/BLAST_RADIUS_PLAYBOOK.md`](docs/BLAST_RADIUS_PLAYBOOK.md) | How risk scores are set and promoted |
 | [`docs/AGENT_DATA_FLOW.md`](docs/AGENT_DATA_FLOW.md) | What each agent sees and when |
-| [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) | Archived rationale for the core design choices |
+| [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) | Archived/historical — rationale for the core design choices as of when they were made; parts are known out of date (see the doc's own header) |
 
 ---
 
