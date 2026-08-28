@@ -99,20 +99,23 @@ should ever be deployed with `--allow-unauthenticated`.
 
 ## Getting started
 
+Dependencies are managed with [uv](https://docs.astral.sh/uv/). `uv sync`
+creates `.venv/` and installs the exact versions from `uv.lock` (runtime
+deps plus the `dev` tool group).
+
 ```bash
-python3.13 -m venv .venv
-.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+uv sync
 cp .env.example .env    # then fill it in
 ```
 
 Run the test suite and the quality gates:
 
 ```bash
-.venv/bin/python -m pytest                       # 288 tests, no network or credentials needed
-.venv/bin/python -m ruff check .
-.venv/bin/python -m black --check .
-.venv/bin/python -m mypy vor_agents/ main.py scripts/
-.venv/bin/python -m bandit -r vor_agents/ main.py scripts/
+uv run pytest                                    # 318 tests, no network or credentials needed
+uv run ruff check .
+uv run black --check .
+uv run mypy vor_agents/ main.py scripts/
+uv run bandit -r vor_agents/ main.py scripts/
 ```
 
 Integration tests that call the real Gemini API are excluded from the
@@ -120,7 +123,7 @@ default run because they cost money and aren't deterministic. Run them
 deliberately:
 
 ```bash
-.venv/bin/python -m pytest -m integration
+uv run pytest -m integration
 ```
 
 Without Vertex AI credentials configured they report skipped rather than
@@ -154,9 +157,9 @@ service authenticates as itself instead of carrying an API key to rotate.
 ## Scripts
 
 ```bash
-.venv/bin/python scripts/seed_firestore.py --case seeded_confirmed --dry-run
-.venv/bin/python scripts/seed_blast_radius_table.py
-.venv/bin/python scripts/backfill_identity_key.py --dry-run
+uv run python scripts/seed_firestore.py --case seeded_confirmed --dry-run
+uv run python scripts/seed_blast_radius_table.py
+uv run python scripts/backfill_identity_key.py --dry-run
 ```
 
 `seed_firestore.py` loads confirmed-negative history — either a synthetic
