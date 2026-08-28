@@ -3,6 +3,39 @@ name = "vor"
 version = "0.1.0"
 description = "Self-tuning confidence layer for Windows Event Log / Hayabusa-style alert triage"
 requires-python = ">=3.13"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "asyncpg>=0.31.0",
+    "fastapi>=0.141.1",
+    "google-adk>=2.7.0",
+    "google-cloud-firestore>=2.28.1",
+    "google-cloud-tasks>=2.24.0",
+    "loguru>=0.7.3",
+    "mlflow>=3.15.1",
+    # mlflow pins pandas<3; the dashboard only needs basic DataFrame ops, so
+    # stay on the 2.x line rather than forcing an mlflow downgrade.
+    "pandas>=2.2,<3",
+    "pydantic>=2.13.4",
+    "sqlalchemy>=2.0.52",
+    "streamlit>=1.62.0",
+    "uvicorn[standard]>=0.52.3",
+]
+
+# Dev-only tooling. Installed by `uv sync`; excluded from prod with
+# `uv sync --no-dev` (see Dockerfile). Exact versions are pinned in uv.lock;
+# pre-commit and CI run these same versions via `uv run` so they cannot drift.
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "black>=26.5.1",
+    "httpx>=0.28.1",
+    "mypy>=2.3.1",
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-mock>=3.15.1",
+    "ruff>=0.16.3",
+]
 
 [tool.black]
 line-length = 100

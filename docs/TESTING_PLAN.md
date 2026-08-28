@@ -45,9 +45,9 @@ should gate on.
 
 ## Running locally
 ```
-pip install -r requirements.txt -r requirements-dev.txt
-pytest                      # default run — integration tests deselected
-ruff check .
+uv sync
+uv run pytest               # default run — integration tests deselected
+uv run ruff check .
 ```
 
 The integration suite is excluded by `pytest.ini`'s

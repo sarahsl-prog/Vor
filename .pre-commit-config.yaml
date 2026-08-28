@@ -1,35 +1,36 @@
 # Vör — local pre-commit hooks.
 #
-# `language: system` (not the usual pre-commit-hosted mirrors) deliberately:
-# runs the ruff/black/mypy/bandit already pinned in requirements-dev.txt,
-# from this repo's own venv, so pre-commit and CI (.github/workflows/ci.yml)
-# can never drift to different tool versions. Run `pip install -r
-# requirements-dev.txt` once, then `pre-commit install`.
+# `language: system` + `uv run --frozen` (not the usual pre-commit-hosted
+# mirrors) deliberately: runs the ruff/black/mypy/bandit versions locked in
+# uv.lock, from this repo's own uv-managed venv, so pre-commit and CI
+# (.github/workflows/ci.yml) can never drift to different tool versions.
+# `--frozen` means the hooks never mutate the lockfile. Requires `uv` on PATH.
+# Run `uv sync` once, then `pre-commit install`.
 repos:
   - repo: local
     hooks:
       - id: ruff
         name: ruff
-        entry: ruff check
+        entry: uv run --frozen ruff check
         language: system
         types: [python]
 
       - id: black
         name: black
-        entry: black
+        entry: uv run --frozen black
         language: system
         types: [python]
 
       - id: mypy
         name: mypy (vor_agents/, main.py)
-        entry: mypy vor_agents/ main.py
+        entry: uv run --frozen mypy vor_agents/ main.py
         language: system
         pass_filenames: false
         types: [python]
 
       - id: bandit
         name: bandit (vor_agents/, main.py)
-        entry: bandit -r vor_agents/ main.py -f txt -q
+        entry: uv run --frozen bandit -r vor_agents/ main.py -f txt -q
         language: system
         pass_filenames: false
         types: [python]

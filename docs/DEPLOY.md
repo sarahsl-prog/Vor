@@ -156,7 +156,7 @@ Revisit once there's an actual notification channel to wire this into.
 ## 3c. Seed the blast-radius table and gate the commit endpoint
 
 ```bash
-.venv/bin/python scripts/seed_blast_radius_table.py
+uv run python scripts/seed_blast_radius_table.py
 ```
 
 Run once, before first production deploy — populates `blast_radius_table`
@@ -180,8 +180,8 @@ carry no `identity_key` field, so `_fetch_all_confirmed_patterns()` skips
 them with a warning — they are not lost, but they stop being audited.
 
 ```bash
-.venv/bin/python scripts/backfill_identity_key.py --dry-run
-.venv/bin/python scripts/backfill_identity_key.py
+uv run python scripts/backfill_identity_key.py --dry-run
+uv run python scripts/backfill_identity_key.py
 ```
 
 Recovers each doc's identity_key from its own `confirmed_instances`, then
@@ -197,8 +197,8 @@ accumulates, so nothing is autonomously suppressed on day one. To start
 from existing history instead:
 
 ```bash
-.venv/bin/python scripts/seed_firestore.py --file history.json --dry-run
-.venv/bin/python scripts/seed_firestore.py --file history.json
+uv run python scripts/seed_firestore.py --file history.json --dry-run
+uv run python scripts/seed_firestore.py --file history.json
 ```
 
 `--dry-run` first, always — it reports the tier each batch would land at
