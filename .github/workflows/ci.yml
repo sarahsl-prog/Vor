@@ -14,30 +14,31 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.13"
+          enable-cache: true
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
+        run: uv sync --frozen
+
+      - name: Lockfile up to date
+        run: uv lock --check
 
       - name: Lint (ruff)
-        run: ruff check .
+        run: uv run --frozen ruff check .
 
       - name: Format (black)
-        run: black .
+        run: uv run --frozen black .
 
       - name: Type check (mypy)
-        run: mypy vor_agents/ main.py scripts/
+        run: uv run --frozen mypy vor_agents/ main.py scripts/
 
       - name: Security scan (bandit)
-        run: bandit -r vor_agents/ main.py scripts/ -f txt -q
+        run: uv run --frozen bandit -r vor_agents/ main.py scripts/ -f txt -q
 
       - name: Test (pytest)
-        run: pytest -v
+        run: uv run --frozen pytest -v
 
       - name: Commit formatting fixes
         if: github.event_name == 'push'
