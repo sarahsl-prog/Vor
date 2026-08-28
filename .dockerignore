@@ -1,0 +1,32 @@
+# Keep the build context (and image) lean. The Dockerfile only needs
+# pyproject.toml, uv.lock, and the application source.
+.git/
+.github/
+.venv/
+venv/
+
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Agent / tooling scratch dirs
+.claude/
+.entire/
+.remember/
+.superpowers/
+
+# Local dev artifacts
+.env
+mlflow.db
+mlruns/
+
+# Not needed at runtime
+tests/
+docs/
+*.md
+.pre-commit-config.yaml
