@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 
+from vor_agents.enrichment import days_since_last_review
 from vor_agents.firestore_config import firestore_database
 
 # ------------------------------------------------------------------
@@ -326,7 +327,20 @@ def load_patterns() -> pd.DataFrame:
                     "failure_count": _as_int(data.get("failure_count")),
                     "instance_count": _as_int(data.get("instance_count")),
                     "diversity_score": round(_as_float(data.get("diversity_score")), 2),
-                    "days_since_last_review": _as_int(data.get("days_since_last_review")),
+                    # Computed from last_reviewed_at, never read as a stored
+                    # field: no confidence_doc writes days_since_last_review,
+                    # so .get() returned None for every real pattern and
+                    # coerced to 0 -- "audited today" shown for a pattern
+                    # that has never been audited at all (true value 9999),
+                    # the most reassuring possible reading of the staleness
+                    # signal in exactly the case that should alarm. Demo data
+                    # supplies the field directly, which is why the table
+                    # looked right without Firestore. enrichment's helper is
+                    # the same one enrich() and the sweep use, so the
+                    # dashboard cannot disagree with them about staleness --
+                    # its docstring records this bug being found in enrich()
+                    # first (Code-review-Aug25 C-3).
+                    "days_since_last_review": days_since_last_review(data, doc_id=doc.id),
                     "last_reviewed_at": data.get("last_reviewed_at", ""),
                     "confirmed_instances": data.get("confirmed_instances", []),
                     "fields": data.get("fields", {}),

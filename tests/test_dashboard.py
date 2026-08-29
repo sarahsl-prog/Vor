@@ -17,9 +17,12 @@ regressions for the two specific bugs, not a widget-by-widget UI suite.
 """
 
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+
+from tests.conftest import FakeFirestoreClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dashboard"))
@@ -46,6 +49,55 @@ class TestPagesRender:
     def test_page_renders_without_exception(self, page):
         app = _app(page).run()
         assert not app.exception
+
+
+class TestStalenessIsComputed:
+    """Regression: load_patterns() read `days_since_last_review` as a
+    stored Firestore field. Nothing writes it — only `last_reviewed_at` is
+    persisted — so it was None for every real pattern and coerced to 0.
+
+    These use the real FakeFirestoreClient and the real loader, because
+    the bug lived precisely in the gap between what the dashboard assumed
+    a confidence_doc contains and what one actually contains. Asserting
+    against a hand-built dict would have reproduced the same wrong
+    assumption and passed.
+    """
+
+    @staticmethod
+    def _load(monkeypatch, docs):
+        import shared
+
+        client = FakeFirestoreClient()
+        for doc_id, data in docs.items():
+            client.collection("confidence_docs").document(doc_id).set(data)
+        monkeypatch.setattr(shared, "_get_firestore_client", lambda: client)
+        shared.load_patterns.clear()
+        return shared.load_patterns()
+
+    def test_never_reviewed_pattern_reads_as_maximally_stale(self, monkeypatch):
+        # The bug's worst case: no last_reviewed_at at all previously
+        # displayed as 0 — "audited today" — for a pattern never audited.
+        frame = self._load(monkeypatch, {"d1": {"identity_key": ["r", "p", "c", "e"]}})
+        assert frame.iloc[0]["days_since_last_review"] == 9999
+
+    def test_recent_review_reads_as_recent(self, monkeypatch):
+        recent = (datetime.now(UTC) - timedelta(days=3)).isoformat()
+        frame = self._load(monkeypatch, {"d1": {"last_reviewed_at": recent}})
+        assert frame.iloc[0]["days_since_last_review"] == 3
+
+    def test_a_stored_days_field_is_ignored_in_favour_of_the_timestamp(self, monkeypatch):
+        # If a doc ever did carry the field, the timestamp still wins —
+        # otherwise the dashboard could disagree with enrich() and the
+        # sweep about the same pattern's staleness.
+        frame = self._load(
+            monkeypatch,
+            {"d1": {"days_since_last_review": 0, "last_reviewed_at": ""}},
+        )
+        assert frame.iloc[0]["days_since_last_review"] == 9999
+
+    def test_malformed_timestamp_is_treated_as_never_reviewed(self, monkeypatch):
+        frame = self._load(monkeypatch, {"d1": {"last_reviewed_at": "not-a-date"}})
+        assert frame.iloc[0]["days_since_last_review"] == 9999
 
 
 class TestAutoRefreshDoesNotLoop:
