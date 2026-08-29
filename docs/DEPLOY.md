@@ -290,6 +290,13 @@ gcloud pubsub topics add-iam-policy-binding vor-alerts \
 body -- see `main.py`'s `_decode_classify_body()`. No separate endpoint
 for direct/manual calls.
 
+To verify the path end to end before a real ingest source exists,
+`scripts/generate_events.py` publishes synthetic alerts to this topic
+(see `docs/DATASET_RUNBOOK.md`). Whatever identity you run it as needs
+the same `roles/pubsub.publisher` binding above. Run it with `--dry-run`
+first: every event that lands is a real Gemini call, plus an audit
+enqueue per `SUPPRESS`.
+
 **Still open:** no dead-letter topic or `--max-delivery-attempts`
 configured on `vor-alerts-sub` yet -- a permanently-malformed message
 will retry and 422 until it ages out of the subscription's retention
