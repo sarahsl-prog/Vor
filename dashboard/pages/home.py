@@ -141,4 +141,4 @@ else:
         "Days Since Review",
         "Failures",
     ]
-    st.dataframe(display, use_container_width=True, hide_index=True)
+    st.dataframe(display, width="stretch", hide_index=True)

@@ -66,7 +66,7 @@ display.columns = [
 
 selected = st.dataframe(
     display,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     on_select="rerun",
     selection_mode="single-row",
@@ -104,4 +104,4 @@ st.divider()
 # Evidence diversity distribution
 # ------------------------------------------------------------------
 st.subheader("🎨 Diversity Score Distribution")
-st.bar_chart(patterns.set_index("identity_key")["diversity_score"], use_container_width=True)
+st.bar_chart(patterns.set_index("identity_key")["diversity_score"], width="stretch")

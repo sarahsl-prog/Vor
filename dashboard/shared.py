@@ -298,10 +298,6 @@ def _get_firestore_client() -> Any:
         return None
 
 
-def firestore_available() -> bool:
-    return _get_firestore_client() is not None
-
-
 # ------------------------------------------------------------------
 # Data loading — confidence_docs
 # ------------------------------------------------------------------
@@ -584,8 +580,21 @@ def _demo_needs_attention() -> pd.DataFrame:
 # ------------------------------------------------------------------
 
 
+def _selected(key: str) -> str | None:
+    """Read a selection out of session state as ``str | None``.
+
+    ``st.session_state.get()`` is untyped, so returning it directly gave
+    mypy an ``Any`` where ``str | None`` was declared -- the annotation
+    claimed a guarantee nothing checked. Coercing here makes it true, and
+    keeps a value written as a non-string (a numpy int from a dataframe
+    selection, say) from reaching the callers that compare it to a doc_id.
+    """
+    value = st.session_state.get(key)
+    return None if value is None else str(value)
+
+
 def get_selected_pattern_id() -> str | None:
-    return st.session_state.get("selected_pattern_id", None)
+    return _selected("selected_pattern_id")
 
 
 def set_selected_pattern_id(val: str) -> None:
@@ -593,7 +602,7 @@ def set_selected_pattern_id(val: str) -> None:
 
 
 def get_selected_trace_id() -> str | None:
-    return st.session_state.get("selected_trace_id", None)
+    return _selected("selected_trace_id")
 
 
 def set_selected_trace_id(val: str) -> None:
