@@ -244,24 +244,40 @@ def _join_identity(value: Any) -> str:
 # ------------------------------------------------------------------
 
 
+_AUTO_REFRESH_ARMED = "_auto_refresh_armed"
+
+
 def inject_auto_refresh(seconds: int = 15) -> None:
     """Rerun the whole app every ``seconds`` so live Firestore data refreshes.
 
     A prior version injected ``<script>window.location.reload()</script>`` via
     ``st.markdown`` — scripts inserted through markup never execute, so it
     silently did nothing. A ``run_every`` fragment is the supported mechanism.
+
+    ``_tick`` is reached two different ways and must behave differently in each:
+    directly from this function on every script run (part of drawing the page —
+    must NOT rerun), and on its own ``run_every`` timer without any script run
+    (the refresh — must rerun the app so the cached loaders re-read Firestore).
+
+    The flag is therefore *disarmed here, on every script run*, and armed only
+    once ``_tick`` has completed a render pass. An earlier version armed it and
+    never disarmed it, so every subsequent script run — the timed refresh, but
+    also any widget interaction or navigation — re-entered ``_tick`` already
+    armed and called ``st.rerun`` while rendering, which reran the script, which
+    re-entered ``_tick``: an unbreakable rerun loop that hung the Home and
+    Traces pages on first interaction. Disarming is what breaks it, so keep the
+    assignment below *outside* the fragment: a fragment-scoped rerun does not
+    re-execute this function, which is exactly the distinction being drawn.
     """
 
     @st.fragment(run_every=seconds)
     def _tick() -> None:
-        # The fragment body runs once during the normal page render and then
-        # again every `seconds`. Only the timed re-executions should trigger a
-        # full-app rerun; the first pass is already part of the page render.
         st.session_state["_last_refresh"] = datetime.now(UTC).strftime("%H:%M:%S UTC")
-        if st.session_state.get("_auto_refresh_primed"):
+        if st.session_state.get(_AUTO_REFRESH_ARMED):
             st.rerun(scope="app")
-        st.session_state["_auto_refresh_primed"] = True
+        st.session_state[_AUTO_REFRESH_ARMED] = True
 
+    st.session_state[_AUTO_REFRESH_ARMED] = False
     _tick()
 
 
