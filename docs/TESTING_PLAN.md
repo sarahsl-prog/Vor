@@ -26,6 +26,7 @@ should gate on.
 | `scripts/seed_firestore.py` | `test_seed_firestore.py` | `--file` input validation (validated before any write), identity grouping, tier reporting, dry-run |
 | `scripts/backfill_identity_key.py` | `test_backfill_identity_key.py` | identity_key recovery from instances, re-key to the hashed doc ID, idempotency, unrecoverable-doc skip |
 | Live Gemini | `test_integration_gemini.py` | Real-API round-trip into valid `ClassifierOutput`/`AuditorOutput`. Marked `integration`, deselected by default (`pytest.ini` `addopts`); run with `pytest -m integration`. Skips cleanly without credentials |
+| `dashboard/` | `test_dashboard.py` | Page render smoke tests through Streamlit's `AppTest` (no browser or server), plus regressions for the auto-refresh rerun loop and for staleness being computed from `last_reviewed_at` rather than read as a stored field. Renders via the demo fallback, which is what an operator without credentials sees |
 | Known gaps | `test_known_gaps.py` | `xfail`-marked regression test for the identity-key delimiter fragility — tracked, not silently ignored |
 
 ## What's deliberately NOT covered yet

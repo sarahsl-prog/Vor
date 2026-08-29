@@ -1,6 +1,7 @@
 """Vör Dashboard — Pattern detail drill-down page."""
 
 import json
+from typing import Any
 
 import streamlit as st
 from shared import (
@@ -29,18 +30,21 @@ if not selected_id:
     st.stop()
 
 patterns = load_patterns()
-row = patterns[patterns["doc_id"] == selected_id]
-if row.empty:
+# Separate names for the filtered frame and the single row it yields.
+# Rebinding one name from DataFrame to Series hid the type from mypy and
+# made every row["field"] below look like a Series rather than a value.
+matches = patterns[patterns["doc_id"] == selected_id]
+if matches.empty:
     st.error(f"Pattern {selected_id} not found.")
     st.stop()
 
-row = row.iloc[0]
+row = matches.iloc[0]
 
 # ------------------------------------------------------------------
 # Header
 # ------------------------------------------------------------------
 tier_badge = "badge-confirmed" if row["tier"] == "confirmed" else "badge-provisional"
-review_badge = '<span class="badge-review">UNDER REVIEW</span>' if row["under_review"] else ""
+review_badge: str = '<span class="badge-review">UNDER REVIEW</span>' if row["under_review"] else ""
 
 st.markdown(
     f'<div class="panel">'
@@ -65,7 +69,7 @@ st.divider()
 # Structural template fields
 # ------------------------------------------------------------------
 st.subheader("🧱 Structural Template Fields")
-fields = row.get("fields", {})
+fields: dict[str, Any] = row.get("fields", {})
 if not fields:
     st.info("No invariant fields computed yet.")
 else:
@@ -81,7 +85,7 @@ st.divider()
 # Confirmed instances
 # ------------------------------------------------------------------
 st.subheader("📚 Confirmed Instances")
-instances = row.get("confirmed_instances", [])
+instances: list[dict[str, Any]] = row.get("confirmed_instances", [])
 if not instances:
     st.info("No confirmed instances stored.")
 else:

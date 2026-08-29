@@ -79,7 +79,7 @@ with left:
                 "SUPPRESS": "badge-suppress",
                 "ESCALATE": "badge-escalate",
                 "UNCERTAIN": "badge-uncertain",
-            }.get(decision, "badge-provisional")
+            }.get(str(decision), "badge-provisional")
             st.markdown(
                 f'<div class="triage-card">'
                 f'<span class="{badge}">{h(decision)}</span> '
@@ -99,7 +99,7 @@ with right:
                 "NO_ACTION": "badge-suppress",
                 "DOWNGRADE": "badge-escalate",
                 "RECOMMEND_UPGRADE_FOR_HUMAN_REVIEW": "badge-uncertain",
-            }.get(action, "badge-provisional")
+            }.get(str(action), "badge-provisional")
             st.markdown(
                 f'<div class="triage-card">'
                 f'<span class="{badge}">{h(action)}</span> '
