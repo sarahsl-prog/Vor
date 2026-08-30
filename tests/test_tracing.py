@@ -19,6 +19,7 @@ from vor_agents.tracing import (
     PENDING_TRACES_COLLECTION,
     log_audit_trace,
     log_classification_trace,
+    mlflow_experiment_name,
     replay_pending_traces,
 )
 
@@ -32,11 +33,31 @@ class _FakeMlflowRunContext:
 
 
 class _FakeMlflowSuccess:
+    """Records what was logged so tests can assert on the params and tags
+    a reader will later query, not just that logging didn't raise.
+
+    Every method _log_run() calls has to exist here. A missing one raises
+    AttributeError inside _log_run's broad except and silently routes the
+    trace to the Firestore fallback -- which looks exactly like a healthy
+    fallback rather than like a bug, and is the same class of problem the
+    params exist to fix."""
+
+    def __init__(self):
+        self.params = {}
+        self.tags = {}
+        self.experiments = []
+
+    def set_experiment(self, name):
+        self.experiments.append(name)
+
     def start_run(self, run_name=None):
         return _FakeMlflowRunContext()
 
     def log_params(self, params):
-        pass
+        self.params.update(params)
+
+    def set_tag(self, key, value):
+        self.tags[key] = value
 
     def log_dict(self, data, path):
         pass
@@ -225,17 +246,14 @@ class TestReplayPendingTraces:
         assert len(list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream())) == 1
 
     def test_one_bad_doc_does_not_block_the_rest_of_the_batch(self, fake_firestore, monkeypatch):
-        class _FailsForA:
+        class _FailsForA(_FakeMlflowSuccess):
+            # Subclasses rather than reimplementing, so it inherits every
+            # method _log_run() calls; a standalone fake silently fails
+            # every doc the moment tracing.py uses one more mlflow API.
             def start_run(self, run_name=None):
                 if run_name and "'a'" in run_name:
                     raise RuntimeError("still down for this one")
                 return _FakeMlflowRunContext()
-
-            def log_params(self, params):
-                pass
-
-            def log_dict(self, data, path):
-                pass
 
         monkeypatch.setattr("vor_agents.tracing.mlflow", _FailsForA())
         self._seed_pending(fake_firestore, "a")
@@ -272,3 +290,128 @@ class TestReplayPendingTraces:
         count = replay_pending_traces(fake_firestore)
 
         assert count == 1
+
+
+class TestSummaryParams:
+    """The scalar fields promoted onto the MLflow run itself.
+
+    These exist so a reader can filter and aggregate over one search_runs()
+    query instead of downloading run_data.json per run. Everything here is
+    about what a *reader* will see, which is why the assertions are on
+    exact param strings rather than on "logging happened".
+    """
+
+    def test_classification_promotes_decision_and_overrides(self, fake_firestore, monkeypatch):
+        fake = _FakeMlflowSuccess()
+        monkeypatch.setattr("vor_agents.tracing.mlflow", fake)
+        log_classification_trace(
+            {"detection_rule_id": "R"},
+            {"pattern_identity_key": ("R", "p", "c", "e")},
+            _classifier_output(),
+            ["ground_truth_missed"],
+            fake_firestore,
+        )
+        assert fake.params["run_type"] == "classification"
+        assert fake.params["decision"] == "SUPPRESS"
+        assert fake.params["overrides_fired"] == "ground_truth_missed"
+
+    def test_enum_params_are_written_by_value_not_repr(self, fake_firestore, monkeypatch):
+        # Decision subclasses str, but str(Decision.SUPPRESS) is
+        # "Decision.SUPPRESS" on Python 3.11+. Writing that would make
+        # every reader's lookup miss silently -- decisions would just fall
+        # through to a default badge, never raising.
+        fake = _FakeMlflowSuccess()
+        monkeypatch.setattr("vor_agents.tracing.mlflow", fake)
+        log_classification_trace(
+            {}, {"pattern_identity_key": ("R",)}, _classifier_output(), [], fake_firestore
+        )
+        assert fake.params["decision"] == "SUPPRESS"
+        assert "Decision." not in fake.params["decision"]
+
+    def test_no_override_is_written_as_empty_not_omitted(self, fake_firestore, monkeypatch):
+        # "no override fired" is an answer, not missing data: the pipeline
+        # view counts these.
+        fake = _FakeMlflowSuccess()
+        monkeypatch.setattr("vor_agents.tracing.mlflow", fake)
+        log_classification_trace(
+            {}, {"pattern_identity_key": ("R",)}, _classifier_output(), [], fake_firestore
+        )
+        assert fake.params["overrides_fired"] == ""
+
+    def test_identity_key_is_joined_not_repred(self, fake_firestore, monkeypatch):
+        fake = _FakeMlflowSuccess()
+        monkeypatch.setattr("vor_agents.tracing.mlflow", fake)
+        log_classification_trace(
+            {},
+            {"pattern_identity_key": ("R", "p", "c", "e")},
+            _classifier_output(),
+            [],
+            fake_firestore,
+        )
+        assert fake.params["identity_key"] == "R → p → c → e"
+        assert "[" not in fake.params["identity_key"]
+
+    def test_audit_promotes_action_and_failure_flag(self, fake_firestore, monkeypatch):
+        fake = _FakeMlflowSuccess()
+        monkeypatch.setattr("vor_agents.tracing.mlflow", fake)
+        log_audit_trace(("R", "p", "c", "e"), {}, _auditor_output(), True, fake_firestore)
+        assert fake.params["run_type"] == "audit"
+        assert fake.params["action"] == "NO_ACTION"
+        assert fake.params["audit_failed"] == "True"
+
+    def test_fields_a_run_type_lacks_are_omitted(self, fake_firestore, monkeypatch):
+        # An audit has no decision. Omitting it lets a reader distinguish
+        # "this run type has no such field" from "the field was empty".
+        fake = _FakeMlflowSuccess()
+        monkeypatch.setattr("vor_agents.tracing.mlflow", fake)
+        log_audit_trace(("R",), {}, _auditor_output(), False, fake_firestore)
+        assert "decision" not in fake.params
+        assert "overrides_fired" not in fake.params
+
+    def test_reasoning_is_tagged_and_truncated(self, fake_firestore, monkeypatch):
+        fake = _FakeMlflowSuccess()
+        monkeypatch.setattr("vor_agents.tracing.mlflow", fake)
+        output = _classifier_output()
+        output.reasoning = "x" * 9000
+        log_classification_trace({}, {"pattern_identity_key": ("R",)}, output, [], fake_firestore)
+        assert len(fake.tags["reasoning"]) == 8000
+
+    def test_writer_names_the_experiment_readers_resolve(self, fake_firestore, monkeypatch):
+        # The writer used to rely on mlflow reading $MLFLOW_EXPERIMENT_NAME
+        # implicitly, leaving the dashboard to guess the same default with
+        # nothing tying them together.
+        monkeypatch.setenv("MLFLOW_EXPERIMENT_NAME", "vor-prod")
+        fake = _FakeMlflowSuccess()
+        monkeypatch.setattr("vor_agents.tracing.mlflow", fake)
+        log_classification_trace(
+            {}, {"pattern_identity_key": ("R",)}, _classifier_output(), [], fake_firestore
+        )
+        assert fake.experiments == ["vor-prod"]
+        assert mlflow_experiment_name() == "vor-prod"
+
+    def test_experiment_falls_back_to_the_mlflow_default(self, monkeypatch):
+        monkeypatch.delenv("MLFLOW_EXPERIMENT_NAME", raising=False)
+        assert mlflow_experiment_name() == "Default"
+
+    def test_replayed_traces_carry_the_same_params(self, fake_firestore, monkeypatch):
+        # A trace that reached MLflow late, after an outage, must be as
+        # queryable as one that got there first time -- otherwise the
+        # outage window shows up as runs with blank decisions.
+        fake = _FakeMlflowSuccess()
+        monkeypatch.setattr("vor_agents.tracing.mlflow", fake)
+        fake_firestore.collection(PENDING_TRACES_COLLECTION).document("d1").set(
+            {
+                "run_type": "classification",
+                "run_data": {
+                    "identity_key": ["R", "p", "c", "e"],
+                    "decision": "ESCALATE",
+                    "overrides_fired": ["under_review"],
+                    "reasoning": "queued during an outage",
+                },
+                "queued_at": "2026-08-01T00:00:00Z",
+            }
+        )
+        assert replay_pending_traces(fake_firestore) == 1
+        assert fake.params["decision"] == "ESCALATE"
+        assert fake.params["overrides_fired"] == "under_review"
+        assert fake.tags["reasoning"] == "queued during an outage"
