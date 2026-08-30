@@ -106,6 +106,7 @@ you want:
 | `SWEEP_MAX_TARGETS` | `10` | Tuning how much the weekly sweep costs. Every target is a model call, so this is the sweep's cost/coverage dial. Minimum 1; `0` is **rejected**, not honored — it would disable the safety-net audit path while looking like a sweep that found nothing. |
 | `BLAST_RADIUS_CACHE_TTL_SECONDS` | `300` | Trading Firestore reads against how fast a committed blast-radius entry goes live. `0` means never serve from cache. |
 | `SESSION_DB_URL` | In-memory SQLite (`vor_agents/session_config.py`) | Deploying to Cloud Run. `scripts/deploy.sh` builds the Cloud SQL Postgres connection string and mounts it from Secret Manager via `--set-secrets`, not as a plaintext env var — it embeds the DB password (see section 3f below). A value that can't be used falls back to the in-memory default rather than failing the deploy. |
+| `PENDING_TRACE_RETENTION_DAYS` | `30` | Changing how long a queued trace survives before the Firestore TTL policy deletes it. Minimum 1; a bad value is logged and the default used. This is the only thing bounding `pending_traces` if MLflow never recovers. |
 | `TRACE_REPLAY_BATCH_SIZE` | `1000` | Capping how many `pending_traces` docs one scheduled replay run reads into memory. Every 15 minutes (see MLflow tracing section below) this many docs get materialized at once, so this is the replay run's memory dial. Minimum 1; a value below that is rejected and the default is used. |
 
 `SWEEP_MAX_TARGETS` and `BLAST_RADIUS_CACHE_TTL_SECONDS` are integers. A value
@@ -292,10 +293,49 @@ for direct/manual calls.
 
 To verify the path end to end before a real ingest source exists,
 `scripts/generate_events.py` publishes synthetic alerts to this topic
-(see `docs/DATASET_RUNBOOK.md`). Whatever identity you run it as needs
-the same `roles/pubsub.publisher` binding above. Run it with `--dry-run`
-first: every event that lands is a real Gemini call, plus an audit
-enqueue per `SUPPRESS`.
+(see `docs/DATASET_RUNBOOK.md`). Set `EVENT_PUBLISHER_SA` before running
+`deploy.sh` and the binding above is granted for you.
+
+### Running the generator from a GCE VM
+
+A convenient place to run it is the same VM that hosts MLflow. What that
+box needs:
+
+```bash
+# 1. The repo and its dependencies (needs Python 3.13)
+git clone https://github.com/sarahsl-prog/Vor.git && cd Vor
+uv sync
+
+# 2. Credentials. Either the VM's attached service account, or your own:
+gcloud auth application-default login
+
+# 3. Confirm what would be sent -- no credentials or topic needed for this
+uv run python scripts/generate_events.py --count 20 --dry-run
+```
+
+The VM's attached service account needs `roles/pubsub.publisher` on
+`vor-alerts` (that's what `EVENT_PUBLISHER_SA` grants). Note that the
+**default GCE access scopes do not include Pub/Sub publish** — if the VM
+was created without `--scopes cloud-platform`, publishing fails with a
+403 even though the IAM binding is correct. Either recreate the VM with
+that scope or authenticate as a user with `gcloud auth
+application-default login`.
+
+Then send for real:
+
+```bash
+export GCP_PROJECT=your-project-id
+uv run python scripts/generate_events.py --count 200 --rate 1
+```
+
+**Start at `--rate 1`.** Every event is a real Gemini call plus an audit
+enqueue per `SUPPRESS`, so the rate is a spend dial as much as a load
+dial. It is also a backpressure dial: the service deploys with
+`--max-instances 3`, and a rate that outruns three instances leaves
+messages unacknowledged until the 600s deadline, at which point Pub/Sub
+redelivers them and the same alerts get classified twice. Watch the
+Cloud Run request count and the subscription's oldest-unacked-message age
+before turning it up.
 
 **Still open:** no dead-letter topic or `--max-delivery-attempts`
 configured on `vor-alerts-sub` yet -- a permanently-malformed message
@@ -314,16 +354,42 @@ export GCP_REGION=us-central1
 ./scripts/deploy-cleanup.sh
 ```
 
-`deploy.sh` creates/updates the Cloud Run service, the scheduler service
-account, the Cloud Tasks queue, the Cloud Scheduler jobs, the Pub/Sub topic
-and subscription, and the required IAM bindings. It also sets the
-environment variables the service needs. Re-running it is safe.
+`deploy.sh` enables the required APIs, then creates/updates the Cloud Run
+service, the scheduler service account, the Cloud Tasks queue, the Cloud
+SQL instance and session-DB secret, the Cloud Scheduler jobs, the Pub/Sub
+topic and subscription, the Firestore TTL policy, and the required IAM
+bindings. It also sets the environment variables the service needs.
 
-`deploy-cleanup.sh` deletes the same resources in the reverse order. It
-does **not** delete Firestore collections, since they may contain evidence
-you want to keep; if you want to remove that data too, use the
-`gcloud firestore documents delete-all` command shown in the script's
-summary.
+Re-running it is safe, with one thing to know: it sets the service's
+environment with `--set-env-vars`, which **replaces** the whole set rather
+than merging. That makes the script the single source of truth for the
+service's configuration, and it means any variable you applied separately
+with `--update-env-vars` is removed on the next run. Export everything you
+want — `MLFLOW_TRACKING_URI` above all — in the same shell each time:
+
+```bash
+export GCP_PROJECT=your-project-id
+export GCP_REGION=us-central1
+export SESSION_DB_PASSWORD='...'                     # required
+export MLFLOW_TRACKING_URI=http://10.128.0.5:5000    # else traces only queue
+export MLFLOW_EXPERIMENT_NAME=vor-prod
+export EVENT_PUBLISHER_SA=my-vm@PROJECT.iam.gserviceaccount.com
+./scripts/deploy.sh
+```
+
+A failing step now stops the script. An earlier version discarded the
+error and still printed a success summary, which was worst for the
+env-var step: `main.py`'s `_enqueue()` deliberately swallows a missing
+`TASKS_QUEUE`/`SERVICE_URL`, so a green deploy could leave a service that
+accepted alerts and silently never enqueued a single audit.
+
+`deploy-cleanup.sh` deletes the same resources in reverse order, including
+the Cloud SQL instance and the session-DB secret — pass
+`SKIP_CLOUDSQL_CLEANUP=1` to keep those, and note that the instance keeps
+billing if you do. It does **not** delete Firestore collections, since
+they may contain evidence you want to keep; if you want to remove that
+data too, use the `gcloud firestore documents delete-all` command shown in
+the script's summary.
 
 Both scripts require `gcloud` to be authenticated with sufficient
 permissions (Project Owner or equivalent roles to manage Cloud Run,
@@ -331,33 +397,84 @@ Scheduler, Tasks, Pub/Sub, IAM, and service accounts).
 
 ## 5. MLflow tracing
 
-Set the tracking server URI on the Cloud Run service, alongside the
-existing env vars:
+**Set these before running `deploy.sh`, not after.** Step 6 of the script
+uses `--set-env-vars`, which *replaces* the service's whole environment.
+Anything applied out-of-band with `--update-env-vars` survives only until
+the next deploy, which then silently removes it and sends every trace to
+the fallback queue instead:
+
+```bash
+export MLFLOW_TRACKING_URI="http://10.128.0.5:5000"   # your server
+export MLFLOW_EXPERIMENT_NAME="vor-prod"
+./scripts/deploy.sh
+```
+
+`deploy.sh` warns when `MLFLOW_TRACKING_URI` is unset, because without it
+nothing reaches MLflow at all: every trace queues to `pending_traces`,
+and the dashboard's Traces/Home/Pipeline pages have nothing to read.
+
+Without `MLFLOW_EXPERIMENT_NAME` every run lands in MLflow's `Default`
+experiment, so a tracking server shared across environments mixes their
+traces together irreversibly.
+
+### Reaching an MLflow server on a GCE VM
+
+Cloud Run cannot reach a VM's **private** IP by default — it has no route
+into your VPC. Two workable shapes:
+
+**Direct VPC egress (preferred).** Keep the VM private and give the
+service a route in:
 
 ```bash
 gcloud run services update vor \
   --region us-central1 \
-  --update-env-vars "MLFLOW_TRACKING_URI=https://YOUR_MLFLOW_SERVER"
+  --network default \
+  --subnet default \
+  --vpc-egress private-ranges-only
 ```
 
-Set `MLFLOW_EXPERIMENT_NAME` alongside it. Without it every run lands in
-MLflow's `Default` experiment, so a tracking server shared across
-environments mixes their traces together irreversibly:
+Then allow the service's subnet range to reach the MLflow port:
 
 ```bash
-gcloud run services update vor \
-  --region us-central1 \
-  --update-env-vars "MLFLOW_EXPERIMENT_NAME=vor-prod"
+gcloud compute firewall-rules create allow-vor-to-mlflow \
+  --network default \
+  --direction INGRESS \
+  --action ALLOW \
+  --rules tcp:5000 \
+  --source-ranges YOUR_SUBNET_CIDR \
+  --target-tags mlflow
 ```
 
-Both are read by the `mlflow` client itself, not by this repo's code.
+`MLFLOW_TRACKING_URI` is then the VM's internal IP, e.g.
+`http://10.128.0.5:5000`. A Serverless VPC Access connector is the older
+equivalent if Direct VPC egress isn't available in your region.
 
-If the managed server requires its own auth (API key, service-account
-token), that credential goes in Secret Manager / `.env`, never
-hardcoded, per CLAUDE.md's secrets rule -- consult whichever managed
-MLflow offering you're using (Databricks-hosted or self-run) for its own
-auth mechanism; this repo's code just reads `MLFLOW_TRACKING_URI` and
-whatever auth env vars the `mlflow` client itself expects.
+**Public IP.** Simpler, and worse: Cloud Run's egress has no fixed source
+range to firewall against without VPC egress plus Cloud NAT, so you end
+up allowing `0.0.0.0/0` to a server that ships with **no authentication**
+— anyone who finds it can read every alert, decision and reasoning trace
+Vör has produced. If you must, terminate TLS and put an authenticating
+proxy (IAP, or a reverse proxy with basic auth) in front, and treat the
+tracking server as production-sensitive: it holds the same data Firestore
+does.
+
+Either way the credential for any auth you add goes in Secret Manager /
+`.env`, never hardcoded, per CLAUDE.md's secrets rule. This repo's code
+only reads `MLFLOW_TRACKING_URI`; the `mlflow` client reads whatever auth
+env vars your setup needs.
+
+### Check the server's backend store
+
+MLflow 3.15 put the bare `./mlruns` **file store into maintenance mode**:
+it raises unless `MLFLOW_ALLOW_FILE_STORE=true`. If your server was
+started without `--backend-store-uri`, move it to a database backend
+before pointing Vör at it:
+
+```bash
+mlflow server --host 0.0.0.0 --port 5000 \
+  --backend-store-uri sqlite:////var/lib/mlflow/mlflow.db \
+  --artifacts-destination /var/lib/mlflow/artifacts
+```
 
 Scheduled replay job for the pending_traces fallback queue:
 
@@ -390,10 +507,56 @@ Runs logged before this change carry only `run_type` and `identity_key`,
 so they appear in the dashboard with `—` for decision and action. That is
 historical data, not a fault; nothing backfills them.
 
-`pending_traces` growth during an extended MLflow outage is now bounded
-two ways: `replay_pending_traces()` reads at most `$TRACE_REPLAY_BATCH_SIZE`
+`pending_traces` growth during an extended MLflow outage is bounded two
+ways: `replay_pending_traces()` reads at most `$TRACE_REPLAY_BATCH_SIZE`
 docs per scheduled run (default 1000, see `vor_agents/tracing.py`), and
-`scripts/deploy.sh` sets a Firestore TTL policy on `queued_at` so docs
-older than the TTL window are eventually purged even if MLflow never
-recovers. Set `TRACE_REPLAY_BATCH_SIZE` on the Cloud Run service if the
-default batch size doesn't match your traffic.
+`scripts/deploy.sh` sets a Firestore TTL policy on **`expires_at`**, a
+timestamp written as queue time + `$PENDING_TRACE_RETENTION_DAYS`
+(default 30), so docs are purged even if MLflow never recovers.
+
+The policy targets `expires_at` and not `queued_at` for two reasons, both
+of which bit an earlier version of this document. Firestore TTL acts only
+on **timestamp** fields, and `queued_at` is an ISO string — so the policy
+deleted nothing, and the bound described here did not exist. And
+Firestore's expiry *is* the field's value, with no separate window to
+configure, so a policy on the queue time would mark every doc expired the
+instant it was written and sweep the queue within about a day — exactly
+the long outage it is meant to survive.
+
+Set `TRACE_REPLAY_BATCH_SIZE` or `PENDING_TRACE_RETENTION_DAYS` before
+running `deploy.sh` if the defaults don't match your traffic.
+
+## 6. The dashboard
+
+`dashboard/` is a Streamlit app and is deliberately **not** deployed by
+`deploy.sh` — it is an operator tool, not part of the request path, and
+it reads the same two stores the service writes.
+
+It needs:
+
+| | |
+|---|---|
+| Firestore | Application Default Credentials with read access to the project, plus `FIRESTORE_DATABASE` if you use a named database. Without them it renders clearly-labelled demo data. |
+| MLflow | The **same** `MLFLOW_TRACKING_URI` and `MLFLOW_EXPERIMENT_NAME` as the Cloud Run service. A different experiment means an empty Traces page rather than an error. |
+
+Running it on the MLflow VM is the least work — the tracking URI is then
+just `http://localhost:5000`, with no Cloud Run networking involved:
+
+```bash
+export MLFLOW_TRACKING_URI=http://localhost:5000
+export MLFLOW_EXPERIMENT_NAME=vor-prod
+uv run streamlit run dashboard/app.py --server.port 8501
+```
+
+Reach it over an SSH tunnel rather than opening the port — the dashboard
+has no authentication of its own and shows every alert, decision and
+reasoning trace:
+
+```bash
+gcloud compute ssh YOUR_VM --zone YOUR_ZONE -- -L 8501:localhost:8501
+```
+
+The Traces page shows a banner when `pending_traces` is non-empty, naming
+how many runs the feed is behind by. In a healthy deployment that count
+is 0; a growing one means MLflow logging is failing and `/replay-traces`
+has not caught up.

@@ -21,6 +21,12 @@
 #   SERVICE_NAME         -- Cloud Run service name. Default: vor.
 #   SKIP_IAM_CLEANUP     -- If set to "1", do not remove IAM bindings.
 #                           Useful if the bindings are shared with other services.
+#   SESSION_DB_INSTANCE  -- Cloud SQL instance to delete. Default: vor-sessions.
+#   SESSION_DB_URL_SECRET -- Secret Manager secret to delete.
+#                           Default: vor-session-db-url.
+#   SKIP_CLOUDSQL_CLEANUP -- If set to "1", keep the Cloud SQL instance and
+#                           the session-DB secret. Everything else is still
+#                           removed. Use this if the instance is shared.
 #
 # Usage:
 #   export GCP_PROJECT=your-project-id
@@ -39,6 +45,8 @@ set -euo pipefail
 : "${PUBSUB_TOPIC:=vor-alerts}"
 : "${PUBSUB_SUBSCRIPTION:=vor-alerts-sub}"
 : "${SERVICE_NAME:=vor}"
+: "${SESSION_DB_INSTANCE:=vor-sessions}"
+: "${SESSION_DB_URL_SECRET:=vor-session-db-url}"
 
 SCHEDULER_SA_EMAIL="${SCHEDULER_SA}@${GCP_PROJECT}.iam.gserviceaccount.com"
 
@@ -78,7 +86,7 @@ _run_idempotent_delete() {
 # ---------------------------------------------------------------------------
 # 1. Delete Pub/Sub subscription and topic.
 # ---------------------------------------------------------------------------
-echo "[1/6] Deleting Pub/Sub subscription ${PUBSUB_SUBSCRIPTION}..."
+echo "[1/7] Deleting Pub/Sub subscription ${PUBSUB_SUBSCRIPTION}..."
 _run_idempotent_delete pubsub subscriptions delete "${PUBSUB_SUBSCRIPTION}" || true
 
 echo "Deleting Pub/Sub topic ${PUBSUB_TOPIC}..."
@@ -87,7 +95,7 @@ _run_idempotent_delete pubsub topics delete "${PUBSUB_TOPIC}" || true
 # ---------------------------------------------------------------------------
 # 2. Delete Cloud Scheduler jobs.
 # ---------------------------------------------------------------------------
-echo "[2/6] Deleting Cloud Scheduler jobs..."
+echo "[2/7] Deleting Cloud Scheduler jobs..."
 _run_idempotent_delete scheduler jobs delete "vor-weekly-sweep" \
   --location "${GCP_REGION}" || true
 _run_idempotent_delete scheduler jobs delete "vor-trace-replay" \
@@ -96,14 +104,14 @@ _run_idempotent_delete scheduler jobs delete "vor-trace-replay" \
 # ---------------------------------------------------------------------------
 # 3. Delete Cloud Tasks queue.
 # ---------------------------------------------------------------------------
-echo "[3/6] Deleting Cloud Tasks queue ${TASKS_QUEUE}..."
+echo "[3/7] Deleting Cloud Tasks queue ${TASKS_QUEUE}..."
 _run_idempotent_delete tasks queues delete "${TASKS_QUEUE}" \
   --location "${GCP_REGION}" || true
 
 # ---------------------------------------------------------------------------
 # 4. Delete Cloud Run service.
 # ---------------------------------------------------------------------------
-echo "[4/6] Deleting Cloud Run service ${SERVICE_NAME}..."
+echo "[4/7] Deleting Cloud Run service ${SERVICE_NAME}..."
 _run_idempotent_delete run services delete "${SERVICE_NAME}" \
   --region "${GCP_REGION}" \
   --quiet || true
@@ -112,7 +120,7 @@ _run_idempotent_delete run services delete "${SERVICE_NAME}" \
 # 5. Remove IAM policy bindings added by deploy.sh.
 # ---------------------------------------------------------------------------
 if [[ "${SKIP_IAM_CLEANUP:-}" != "1" ]]; then
-  echo "[5/6] Removing IAM policy bindings..."
+  echo "[5/7] Removing IAM policy bindings..."
 
   # Cloud Run invoker binding for the scheduler service account.
   _run_idempotent_delete run services remove-iam-policy-binding "${SERVICE_NAME}" \
@@ -131,14 +139,44 @@ if [[ "${SKIP_IAM_CLEANUP:-}" != "1" ]]; then
   _run_idempotent_delete projects remove-iam-policy-binding "${GCP_PROJECT}" \
     --member "serviceAccount:${CLOUD_RUN_SA}" \
     --role "roles/aiplatform.user" || true
+
+  # Cloud SQL and Secret Manager bindings, both added by deploy.sh step 5
+  # and previously left behind by this script.
+  _run_idempotent_delete projects remove-iam-policy-binding "${GCP_PROJECT}" \
+    --member "serviceAccount:${CLOUD_RUN_SA}" \
+    --role "roles/cloudsql.client" || true
+
+  _run_idempotent_delete projects remove-iam-policy-binding "${GCP_PROJECT}" \
+    --member "serviceAccount:${CLOUD_RUN_SA}" \
+    --role "roles/secretmanager.secretAccessor" || true
 else
-  echo "[5/6] SKIP_IAM_CLEANUP=1; leaving IAM bindings in place."
+  echo "[5/7] SKIP_IAM_CLEANUP=1; leaving IAM bindings in place."
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Delete scheduler service account.
+# 6. Delete the Cloud SQL instance and the session-DB secret.
 # ---------------------------------------------------------------------------
-echo "[6/6] Deleting scheduler service account ${SCHEDULER_SA_EMAIL}..."
+# deploy.sh creates both (step 5) and this script used to delete neither,
+# so "tear it down when you are done" left the most expensive resource in
+# the stack -- a db-f1-micro Cloud SQL instance -- billing indefinitely,
+# while the summary below implied a complete teardown.
+#
+# Session state is per-request and already deleted in orchestrator's
+# finally block, so the instance holds nothing durable worth keeping. It
+# is still the one irreversible deletion here, hence the opt-out.
+if [[ "${SKIP_CLOUDSQL_CLEANUP:-}" != "1" ]]; then
+  echo "[6/7] Deleting Cloud SQL instance ${SESSION_DB_INSTANCE} and secret ${SESSION_DB_URL_SECRET}..."
+  _run_idempotent_delete sql instances delete "${SESSION_DB_INSTANCE}" --quiet || true
+  _run_idempotent_delete secrets delete "${SESSION_DB_URL_SECRET}" --quiet || true
+else
+  echo "[6/7] SKIP_CLOUDSQL_CLEANUP=1; leaving ${SESSION_DB_INSTANCE} and ${SESSION_DB_URL_SECRET} in place."
+  echo "      NOTE: the Cloud SQL instance continues to incur charges." >&2
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Delete scheduler service account.
+# ---------------------------------------------------------------------------
+echo "[7/7] Deleting scheduler service account ${SCHEDULER_SA_EMAIL}..."
 _run_idempotent_delete iam service-accounts delete "${SCHEDULER_SA_EMAIL}" --quiet || true
 
 # ---------------------------------------------------------------------------
@@ -154,6 +192,15 @@ echo "  - Pub/Sub topic: ${PUBSUB_TOPIC}"
 echo "  - Pub/Sub subscription: ${PUBSUB_SUBSCRIPTION}"
 echo "  - Service account: ${SCHEDULER_SA_EMAIL}"
 echo "  - IAM bindings (unless SKIP_IAM_CLEANUP=1)"
+if [[ "${SKIP_CLOUDSQL_CLEANUP:-}" != "1" ]]; then
+  echo "  - Cloud SQL instance: ${SESSION_DB_INSTANCE}"
+  echo "  - Secret: ${SESSION_DB_URL_SECRET}"
+else
+  echo ""
+  echo "NOT deleted (SKIP_CLOUDSQL_CLEANUP=1) and STILL BILLING:"
+  echo "  - Cloud SQL instance: ${SESSION_DB_INSTANCE}"
+  echo "  - Secret: ${SESSION_DB_URL_SECRET}"
+fi
 echo ""
 echo "Firestore collections were NOT deleted. If you want to remove them:"
 echo "  gcloud firestore documents delete-all --collection-ids=confidence_docs,blast_radius_table,blast_radius_proposals,needs_attention,pending_traces"
