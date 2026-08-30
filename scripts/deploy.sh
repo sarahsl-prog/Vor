@@ -27,8 +27,19 @@
 #   FIRESTORE_DATABASE   -- Firestore database name. Default: (default).
 #   GEMINI_MODEL         -- Model override. If unset, the service uses its
 #                           built-in default.
-#   MLFLOW_TRACKING_URI  -- Optional external MLflow tracking server.
-#   MLFLOW_EXPERIMENT_NAME -- Optional MLflow experiment name.
+#   MLFLOW_TRACKING_URI  -- External MLflow tracking server. Optional, but
+#                           without it every trace queues to Firestore
+#                           instead of reaching MLflow, and the dashboard's
+#                           trace pages show nothing. The script warns.
+#   MLFLOW_EXPERIMENT_NAME -- MLflow experiment name. Give the dashboard the
+#                           same value or it reads a different experiment.
+#   EVENT_PUBLISHER_SA   -- Service account that publishes alerts to the
+#                           topic (a real ingest pipeline, or the VM you run
+#                           scripts/generate_events.py from). Granted
+#                           roles/pubsub.publisher when set.
+#   TRACE_REPLAY_BATCH_SIZE -- Optional replay batch cap.
+#   PENDING_TRACE_RETENTION_DAYS -- Optional; how long a queued trace lives
+#                           before the Firestore TTL policy deletes it.
 #   SWEEP_MAX_TARGETS    -- Optional sweep target cap.
 #   BLAST_RADIUS_CACHE_TTL_SECONDS -- Optional blast-radius cache TTL.
 #   SESSION_DB_INSTANCE  -- Cloud SQL instance name for session persistence.
@@ -49,9 +60,16 @@
 #   export SERVICE_URL=https://vor-xyz-uc.a.run.app   # optional if service exists
 #   ./scripts/deploy.sh
 #
-# The script exits non-zero on any unhandled gcloud error. Idempotent re-runs
-# are safe: gcloud "create" commands that fail with "already exists" are
-# handled, and "update" commands overwrite previous settings.
+# The script exits non-zero on any unhandled gcloud error -- and, unlike an
+# earlier version, actually stops rather than continuing to a green summary.
+# Idempotent re-runs are safe: gcloud "create" commands that fail with
+# "already exists" are handled, and "update" commands overwrite previous
+# settings.
+#
+# NOTE: step 6 uses --set-env-vars, which REPLACES the service's entire
+# environment. Export every variable you want set (MLFLOW_TRACKING_URI in
+# particular) before each run; setting them afterwards with
+# --update-env-vars works until the next deploy silently removes them.
 
 set -euo pipefail
 
@@ -71,6 +89,25 @@ echo "Resolving project number for ${GCP_PROJECT}..."
 PROJECT_NUMBER=$(gcloud projects describe "${GCP_PROJECT}" --format='value(projectNumber)')
 : "${CLOUD_RUN_SA:=${PROJECT_NUMBER}-compute@developer.gserviceaccount.com}"
 
+# ---------------------------------------------------------------------------
+# 0. Enable the APIs every later step depends on.
+# ---------------------------------------------------------------------------
+# Without this a first run on a fresh project dies at whichever service
+# happens to be reached first, with an API-not-enabled error that reads
+# like a permissions problem. Enabling is idempotent and free.
+REQUIRED_APIS=(
+  run.googleapis.com
+  cloudbuild.googleapis.com
+  cloudtasks.googleapis.com
+  cloudscheduler.googleapis.com
+  sqladmin.googleapis.com
+  secretmanager.googleapis.com
+  aiplatform.googleapis.com
+  firestore.googleapis.com
+  pubsub.googleapis.com
+  iam.googleapis.com
+)
+
 echo ""
 echo "=== Vör deployment ==="
 echo "Project:        ${GCP_PROJECT}"
@@ -78,11 +115,34 @@ echo "Region:         ${GCP_REGION}"
 echo "Cloud Run SA:   ${CLOUD_RUN_SA}"
 echo "Scheduler SA:   ${SCHEDULER_SA_EMAIL}"
 echo "Firestore DB:   ${FIRESTORE_DATABASE}"
+echo "MLflow:         ${MLFLOW_TRACKING_URI:-<unset - traces will queue to Firestore>}"
 echo ""
+
+# MLflow is not required for the service to run, but leaving it unset is
+# almost never what an operator wants: every trace goes to the
+# pending_traces fallback queue instead of a tracking server, and the
+# dashboard's Traces/Home/Pipeline pages have nothing to read. Warn
+# rather than fail -- a deploy without tracing is still a valid deploy.
+if [[ -z "${MLFLOW_TRACKING_URI:-}" ]]; then
+  echo "WARNING: MLFLOW_TRACKING_URI is not set." >&2
+  echo "  Traces will be queued to Firestore (pending_traces) and never replayed," >&2
+  echo "  and the dashboard's trace pages will show nothing." >&2
+  echo "  See docs/DEPLOY.md section 5." >&2
+  echo "" >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Helper: run gcloud and swallow "already exists" / "already has binding" errors.
 # ---------------------------------------------------------------------------
+# A real failure returns non-zero and, with `set -e`, stops the script.
+# Call sites deliberately do NOT append `|| true`: that used to discard
+# this return value, so a genuine failure printed "ERROR:" to stderr and
+# the script carried on to print "=== Deployment complete ===" and exit 0.
+# The env-var step was among them, and main.py's _enqueue() deliberately
+# swallows a missing TASKS_QUEUE/SERVICE_URL -- so a failed step 6 gave a
+# green deploy and a service that silently never enqueued a single audit.
+# "Already exists" on a re-run is still absorbed here, which is what makes
+# the script idempotent; that is this function's whole job.
 _run_idempotent() {
   local cmd="$1"
   shift
@@ -98,10 +158,13 @@ _run_idempotent() {
   fi
 }
 
+echo "[0/12] Enabling required APIs..."
+gcloud services enable "${REQUIRED_APIS[@]}" --project "${GCP_PROJECT}"
+
 # ---------------------------------------------------------------------------
 # 1. Build and deploy the Cloud Run service.
 # ---------------------------------------------------------------------------
-echo "[1/11] Deploying Cloud Run service ${SERVICE_NAME}..."
+echo "[1/12] Deploying Cloud Run service ${SERVICE_NAME}..."
 _run_idempotent run deploy "${SERVICE_NAME}" \
   --source . \
   --region "${GCP_REGION}" \
@@ -115,7 +178,7 @@ _run_idempotent run deploy "${SERVICE_NAME}" \
 # 2. Resolve SERVICE_URL if not provided.
 # ---------------------------------------------------------------------------
 if [[ -z "${SERVICE_URL:-}" ]]; then
-  echo "[2/11] SERVICE_URL not set; looking up Cloud Run service URL..."
+  echo "[2/12] SERVICE_URL not set; looking up Cloud Run service URL..."
   SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
     --region "${GCP_REGION}" \
     --format 'value(status.url)')
@@ -131,9 +194,9 @@ echo "Service URL: ${SERVICE_URL}"
 # ---------------------------------------------------------------------------
 # 3. Create the scheduler service account.
 # ---------------------------------------------------------------------------
-echo "[3/11] Ensuring scheduler/invoker service account ${SCHEDULER_SA_EMAIL}..."
+echo "[3/12] Ensuring scheduler/invoker service account ${SCHEDULER_SA_EMAIL}..."
 _run_idempotent iam service-accounts create "${SCHEDULER_SA}" \
-  --display-name "Vör Cloud Scheduler invoker" || true
+  --display-name "Vör Cloud Scheduler invoker"
 
 # Grant the scheduler SA permission to invoke the Cloud Run service.
 echo "Granting roles/run.invoker to ${SCHEDULER_SA_EMAIL} on ${SERVICE_NAME}..."
@@ -141,23 +204,23 @@ _run_idempotent run services add-iam-policy-binding "${SERVICE_NAME}" \
   --region "${GCP_REGION}" \
   --member "serviceAccount:${SCHEDULER_SA_EMAIL}" \
   --role "roles/run.invoker" \
-  --platform managed || true
+  --platform managed
 
 # ---------------------------------------------------------------------------
 # 4. Cloud Tasks queue + IAM.
 # ---------------------------------------------------------------------------
-echo "[4/11] Ensuring Cloud Tasks queue ${TASKS_QUEUE}..."
+echo "[4/12] Ensuring Cloud Tasks queue ${TASKS_QUEUE}..."
 _run_idempotent tasks queues create "${TASKS_QUEUE}" \
   --location "${GCP_REGION}" \
   --max-attempts 5 \
   --min-backoff 10s \
-  --max-backoff 300s || true
+  --max-backoff 300s
 
 echo "Granting roles/cloudtasks.enqueuer to ${CLOUD_RUN_SA} on ${TASKS_QUEUE}..."
 _run_idempotent tasks queues add-iam-policy-binding "${TASKS_QUEUE}" \
   --location "${GCP_REGION}" \
   --member "serviceAccount:${CLOUD_RUN_SA}" \
-  --role "roles/cloudtasks.enqueuer" || true
+  --role "roles/cloudtasks.enqueuer"
 
 # ---------------------------------------------------------------------------
 # 5. Cloud SQL instance + database for session persistence.
@@ -166,7 +229,7 @@ _run_idempotent tasks queues add-iam-policy-binding "${TASKS_QUEUE}" \
 : "${SESSION_DB_NAME:=vor_sessions}"
 : "${SESSION_DB_USER:=vor}"
 
-echo "[5/11] Ensuring Cloud SQL instance ${SESSION_DB_INSTANCE} exists..."
+echo "[5/12] Ensuring Cloud SQL instance ${SESSION_DB_INSTANCE} exists..."
 _run_idempotent sql instances create "${SESSION_DB_INSTANCE}" \
   --database-version=POSTGRES_16 \
   --tier=db-f1-micro \
@@ -230,7 +293,7 @@ _run_idempotent projects add-iam-policy-binding "${GCP_PROJECT}" \
 # ---------------------------------------------------------------------------
 # 6. Set environment variables on the Cloud Run service.
 # ---------------------------------------------------------------------------
-echo "[6/11] Updating Cloud Run environment variables..."
+echo "[6/12] Updating Cloud Run environment variables..."
 
 ENV_VARS=(
   "GCP_PROJECT=${GCP_PROJECT}"
@@ -262,26 +325,40 @@ fi
 if [[ -n "${BLAST_RADIUS_CACHE_TTL_SECONDS:-}" ]]; then
   ENV_VARS+=("BLAST_RADIUS_CACHE_TTL_SECONDS=${BLAST_RADIUS_CACHE_TTL_SECONDS}")
 fi
+if [[ -n "${TRACE_REPLAY_BATCH_SIZE:-}" ]]; then
+  ENV_VARS+=("TRACE_REPLAY_BATCH_SIZE=${TRACE_REPLAY_BATCH_SIZE}")
+fi
+if [[ -n "${PENDING_TRACE_RETENTION_DAYS:-}" ]]; then
+  ENV_VARS+=("PENDING_TRACE_RETENTION_DAYS=${PENDING_TRACE_RETENTION_DAYS}")
+fi
 
 ENV_VARS_STRING=$(IFS=,; echo "${ENV_VARS[*]}")
+
+# --set-env-vars REPLACES the service's entire env-var set; it does not
+# merge. That is deliberate -- it makes this script the single source of
+# truth for the service's configuration -- but it means anything set
+# out-of-band with `gcloud run services update --update-env-vars` is
+# removed by the next deploy. So export every variable you want (notably
+# MLFLOW_TRACKING_URI and MLFLOW_EXPERIMENT_NAME) before running this,
+# rather than setting them afterwards.
 
 _run_idempotent run services update "${SERVICE_NAME}" \
   --region "${GCP_REGION}" \
   --set-env-vars "${ENV_VARS_STRING}" \
-  --set-secrets "SESSION_DB_URL=${SESSION_DB_URL_SECRET}:latest" || true
+  --set-secrets "SESSION_DB_URL=${SESSION_DB_URL_SECRET}:latest"
 
 # ---------------------------------------------------------------------------
 # 7. Grant the Cloud Run service account access to Vertex AI.
 # ---------------------------------------------------------------------------
-echo "[7/11] Granting roles/aiplatform.user to ${CLOUD_RUN_SA}..."
+echo "[7/12] Granting roles/aiplatform.user to ${CLOUD_RUN_SA}..."
 _run_idempotent projects add-iam-policy-binding "${GCP_PROJECT}" \
   --member "serviceAccount:${CLOUD_RUN_SA}" \
-  --role "roles/aiplatform.user" || true
+  --role "roles/aiplatform.user"
 
 # ---------------------------------------------------------------------------
 # 8. Cloud Scheduler jobs for /sweep and /replay-traces.
 # ---------------------------------------------------------------------------
-echo "[8/11] Ensuring Cloud Scheduler jobs..."
+echo "[8/12] Ensuring Cloud Scheduler jobs..."
 
 _run_idempotent scheduler jobs create http "vor-weekly-sweep" \
   --location "${GCP_REGION}" \
@@ -289,7 +366,7 @@ _run_idempotent scheduler jobs create http "vor-weekly-sweep" \
   --uri "${SERVICE_URL}/sweep" \
   --http-method POST \
   --oidc-service-account-email "${SCHEDULER_SA_EMAIL}" \
-  --oidc-token-audience "${SERVICE_URL}" || true
+  --oidc-token-audience "${SERVICE_URL}"
 
 _run_idempotent scheduler jobs create http "vor-trace-replay" \
   --location "${GCP_REGION}" \
@@ -297,28 +374,54 @@ _run_idempotent scheduler jobs create http "vor-trace-replay" \
   --uri "${SERVICE_URL}/replay-traces" \
   --http-method POST \
   --oidc-service-account-email "${SCHEDULER_SA_EMAIL}" \
-  --oidc-token-audience "${SERVICE_URL}" || true
+  --oidc-token-audience "${SERVICE_URL}"
 
 # ---------------------------------------------------------------------------
 # 9. Pub/Sub topic + push subscription for /classify.
 # ---------------------------------------------------------------------------
-echo "[9/11] Ensuring Pub/Sub topic and subscription..."
-_run_idempotent pubsub topics create "${PUBSUB_TOPIC}" || true
+echo "[9/12] Ensuring Pub/Sub topic and subscription..."
+_run_idempotent pubsub topics create "${PUBSUB_TOPIC}"
 
 _run_idempotent pubsub subscriptions create "${PUBSUB_SUBSCRIPTION}" \
   --topic "${PUBSUB_TOPIC}" \
   --push-endpoint "${SERVICE_URL}/classify" \
   --push-auth-service-account "${SCHEDULER_SA_EMAIL}" \
-  --ack-deadline 600 || true
+  --ack-deadline 600
+
+# Whatever publishes alerts -- a real ingest pipeline, or the VM you run
+# scripts/generate_events.py from -- needs pubsub.publisher on the topic.
+# Previously this was only ECHOED as a manual next step with a
+# placeholder service account, so the one binding needed to actually feed
+# the system was the one thing the deploy script did not do.
+if [[ -n "${EVENT_PUBLISHER_SA:-}" ]]; then
+  echo "Granting roles/pubsub.publisher to ${EVENT_PUBLISHER_SA} on ${PUBSUB_TOPIC}..."
+  _run_idempotent pubsub topics add-iam-policy-binding "${PUBSUB_TOPIC}" \
+    --member "serviceAccount:${EVENT_PUBLISHER_SA}" \
+    --role "roles/pubsub.publisher"
+fi
 
 # ---------------------------------------------------------------------------
 # 10. Set a Firestore TTL policy on pending_traces.queued_at.
 # ---------------------------------------------------------------------------
-echo "[10/11] Setting TTL policy on pending_traces.queued_at..."
-_run_idempotent firestore fields ttls update queued_at \
+echo "[10/12] Setting TTL policy on pending_traces.expires_at..."
+# expires_at, NOT queued_at. queued_at is written as an ISO string, and a
+# Firestore TTL policy only acts on timestamp fields -- pointed at a
+# string it silently deletes nothing, so the documented bound on
+# pending_traces growth never existed. expires_at is a real timestamp,
+# set to write time + PENDING_TRACE_RETENTION_DAYS (see
+# vor_agents/tracing.py), because Firestore's expiry IS the field value:
+# a policy on the write time would sweep the queue almost immediately.
+_run_idempotent firestore fields ttls update expires_at \
   --collection-group=pending_traces \
   --enable-ttl \
   --database="${FIRESTORE_DATABASE}"
+
+# Disable the old, inert policy so a project deployed before this fix
+# does not keep a misleading TTL policy on a field nothing expires by.
+gcloud firestore fields ttls update queued_at \
+  --collection-group=pending_traces \
+  --disable-ttl \
+  --database="${FIRESTORE_DATABASE}" >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # 11. Summary.
@@ -336,8 +439,13 @@ echo "  2. (Optional) Seed confirmed-negative history:"
 echo "     .venv/bin/python scripts/seed_firestore.py --file history.json --dry-run"
 echo "  3. (If pre-existing data lacks identity_key) Run backfill:"
 echo "     .venv/bin/python scripts/backfill_identity_key.py --dry-run"
-echo "  4. Grant pubsub.publisher to your ingest pipeline:"
-echo "     gcloud pubsub topics add-iam-policy-binding ${PUBSUB_TOPIC} \\"
-echo "       --member \"serviceAccount:YOUR_INGEST_SOURCE_SERVICE_ACCOUNT\" \\"
-echo "       --role roles/pubsub.publisher"
+if [[ -z "${EVENT_PUBLISHER_SA:-}" ]]; then
+  echo "  4. Grant pubsub.publisher to whatever publishes alerts (set"
+  echo "     EVENT_PUBLISHER_SA before re-running to have this done for you):"
+  echo "     gcloud pubsub topics add-iam-policy-binding ${PUBSUB_TOPIC} \\"
+  echo "       --member \"serviceAccount:YOUR_PUBLISHER_SERVICE_ACCOUNT\" \\"
+  echo "       --role roles/pubsub.publisher"
+else
+  echo "  4. (done) roles/pubsub.publisher granted to ${EVENT_PUBLISHER_SA}"
+fi
 echo ""
