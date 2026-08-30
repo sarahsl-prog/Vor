@@ -112,7 +112,7 @@ cp .env.example .env    # then fill it in
 Run the test suite and the quality gates:
 
 ```bash
-uv run pytest                                    # 417 tests, no network or credentials needed
+uv run pytest                                    # 423 tests, no network or credentials needed
 uv run ruff check .
 uv run black --check .
 uv run mypy vor_agents/ main.py scripts/ dashboard/
