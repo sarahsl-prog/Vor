@@ -116,6 +116,52 @@ failure — but you should see it rather than assume `confirmed`.
 
 ---
 
+## Sending traffic at the service
+
+Seeding loads the *history*. `scripts/generate_events.py` sends the
+traffic that gets judged against it, publishing to the `vor-alerts`
+Pub/Sub topic so alerts arrive through the real push subscription at
+`POST /classify`.
+
+The stream is not a replay of the 6 probes. It is background noise from
+`vor_agents/event_stream.py` — a pool of recurring benign patterns, a
+configurable fraction of them breaking one or two diffable fields, and a
+fraction carrying never-seen identity keys — with one canonical probe
+injected every `--case-interval` events, cycling through all 6 in
+`DatasetCase` order.
+
+The realism matters for what you can conclude from a run. Six probes
+against six patterns never exercises volume, an unfamiliar pattern
+appearing mid-stream, or a deviation that has to be found in traffic
+rather than handed over labelled. It also means a canonical probe arrives
+as one more instance of an already-busy pattern, because the SharePoint
+ToolPane pattern the 6 cases are built around is itself in the noise pool.
+
+The usual order on a fresh project:
+
+```bash
+# 1. history for the pattern you want suppressed
+uv run python scripts/seed_firestore.py --case seeded_confirmed
+
+# 2. check what the stream would send
+uv run python scripts/generate_events.py --count 20 --dry-run
+
+# 3. send it
+uv run python scripts/generate_events.py --count 200 --rate 5
+```
+
+Injected probes are findable afterwards: their `instance_id` ends in the
+case name (`gen-000023-low_diversity`). The case's *expected outcome* is
+deliberately not in the payload — an answer key inside the alert would be
+visible to enrichment, to the prompt, and to Firestore, which would
+invalidate whatever the run was meant to measure. It lives on
+`GeneratedEvent.expected_outcome`, client-side only.
+
+Every published event is a real Gemini call plus an audit enqueue per
+`SUPPRESS`, so `--dry-run` first is the rule here, same as for seeding.
+
+---
+
 ## Related runbooks
 
 - `docs/DEPLOY.md` — deploying the service; also covers seeding the
@@ -128,9 +174,19 @@ failure — but you should see it rather than assume `confirmed`.
 
 ## Still open
 
-- **No real-history exporter.** `--file` takes a JSON list; producing that
-  list from actual Hayabusa/EVTX output is not built here and depends on
-  your ingest pipeline.
+- **No real-history exporter.** `--file` takes a JSON list — for both
+  `seed_firestore.py` and `generate_events.py` — and producing that list
+  from actual Hayabusa/EVTX output is not built here. It depends on your
+  ingest pipeline, and it is a mapping job rather than a format
+  conversion: of the five `DIFFABLE_FIELDS`, only `integrity_level` has a
+  native Sysmon/EVTX counterpart. The other four are Vör-specific
+  enrichment something upstream must supply, and both `--file` paths
+  refuse a record missing any of them rather than guessing.
+- **The traffic mix is uncalibrated.** `generate_events.py`'s default
+  deviation and novel-pattern rates were picked so a few hundred events
+  contain each condition at least once, not to match any measured base
+  rate — the same missing-production-data gap as the graduation
+  thresholds.
 - **No end-to-end fixture wiring.** `tests/conftest.py` still carries its
   own hand-written fixtures for cases #3 and #6, predating
   `vor_agents/datasets.py`. They agree with the generated cases today but
