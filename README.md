@@ -63,6 +63,7 @@ The full reasoning behind these choices is archived in
 | `vor_agents/task_queue.py` | Cloud Tasks audit-enqueue path with server-side dedup | No |
 | `vor_agents/tracing.py` | MLflow tracing, with a Firestore fallback queue | No |
 | `vor_agents/datasets.py` | Synthetic dataset generation for the 6 canonical cases | No |
+| `vor_agents/event_stream.py` | Synthetic alert *stream*: background traffic with the 6 cases injected | No |
 | `vor_agents/model_config.py` | Gemini model selection (`GEMINI_MODEL`) | No |
 | `vor_agents/firestore_config.py` | Firestore database selection (`FIRESTORE_DATABASE`) | No |
 | `vor_agents/env_config.py` | Integer settings read from the environment | No |
@@ -111,7 +112,7 @@ cp .env.example .env    # then fill it in
 Run the test suite and the quality gates:
 
 ```bash
-uv run pytest                                    # 332 tests, no network or credentials needed
+uv run pytest                                    # 395 tests, no network or credentials needed
 uv run ruff check .
 uv run black --check .
 uv run mypy vor_agents/ main.py scripts/ dashboard/
@@ -160,6 +161,7 @@ service authenticates as itself instead of carrying an API key to rotate.
 uv run python scripts/seed_firestore.py --case seeded_confirmed --dry-run
 uv run python scripts/seed_blast_radius_table.py
 uv run python scripts/backfill_identity_key.py --dry-run
+uv run python scripts/generate_events.py --count 20 --dry-run
 ```
 
 `seed_firestore.py` loads confirmed-negative history — either a synthetic
@@ -171,6 +173,46 @@ migration for Firestore data predating the current doc-ID scheme.
 `--dry-run`; use it first. `seed_blast_radius_table.py` takes no arguments
 and is idempotent — re-running rewrites the same entries with the same
 values.
+
+### Generating alert traffic
+
+`seed_firestore.py` loads the *history* a pattern is judged against.
+`generate_events.py` is the other half — the live traffic that gets
+judged. It publishes alerts to the `vor-alerts` Pub/Sub topic, so events
+arrive through the real push subscription at `POST /classify` rather than
+a test shortcut.
+
+The stream is background noise with the 6 canonical cases injected into
+it, which is closer to what triage actually looks like than replaying six
+labelled probes: a pool of recurring benign patterns
+(`vor_agents/event_stream.py`), a small fraction of events breaking one or
+two diffable fields, a small fraction carrying a never-seen identity key,
+and one canonical probe every `--case-interval` events.
+
+```bash
+# Inspect what would be sent, without sending it or needing credentials
+uv run python scripts/generate_events.py --count 20 --dry-run
+
+# 500 events at 5/sec to the default topic
+uv run python scripts/generate_events.py --count 500 --rate 5
+
+# Soak for 10 minutes at 2/sec; Ctrl-C stops cleanly and still summarizes
+uv run python scripts/generate_events.py --duration 600 --rate 2
+
+# Replay a JSON list of real alerts instead of generating them
+uv run python scripts/generate_events.py --file alerts.json
+```
+
+`--dry-run` prints one alert per line on stdout (summary goes to stderr),
+so it pipes into `jq` and back into `--file` unchanged. Run it first:
+every published event is a real Gemini call, plus an audit enqueue per
+`SUPPRESS`.
+
+`--file` is the path for a Hayabusa/EVTX export, but the mapping is still
+yours to write — see Known gaps. Records are validated for all four
+identity fields and all five `DIFFABLE_FIELDS` before anything is
+published, and one bad record refuses the whole run rather than leaving
+half of it classified.
 
 ---
 
@@ -208,5 +250,11 @@ values.
   a warning rather than crashing. Run `scripts/backfill_identity_key.py`
   before deploying against such data.
 - **No Hayabusa/EVTX exporter.** Turning raw output into the JSON that
-  `seed_firestore.py --file` expects depends on your ingest pipeline and
-  isn't built here.
+  `seed_firestore.py --file` and `generate_events.py --file` expect
+  depends on your ingest pipeline and isn't built here. Note that this is
+  a real mapping job, not a format conversion: of the five
+  `DIFFABLE_FIELDS`, only `integrity_level` has a native Sysmon/EVTX
+  counterpart. `auth_method_present`, `session_cookie_present`,
+  `file_access_mode` and `egress_follows_access` are Vör-specific
+  enrichment that something upstream has to supply. Both `--file` paths
+  validate that all five are present rather than guessing them.

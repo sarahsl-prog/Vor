@@ -1051,6 +1051,26 @@ wheels = [
 ]
 
 [[package]]
+name = "google-cloud-pubsub"
+version = "2.39.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpc-google-iam-v1" },
+    { name = "grpcio" },
+    { name = "grpcio-status" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-sdk" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d1/2f/a70b6ba2016acc16ca3e4d357151edda047f63752ddcf8baee29c41e5f94/google_cloud_pubsub-2.39.2.tar.gz", hash = "sha256:934a3ab7496a6da09cd97d866bef3e47092e904688a66f60750895a7484bd585", size = 403181, upload-time = "2026-08-25T19:18:59.568Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/e1/14519798b767f1ce4adf3c239c31bb1a5af607646e293e92ed1770faaa06/google_cloud_pubsub-2.39.2-py3-none-any.whl", hash = "sha256:b1295c6641032aff1dabbddf495b10642a5b547f6783ee4c6bb3365682e71354", size = 323836, upload-time = "2026-08-24T21:55:46.512Z" },
+]
+
+[[package]]
 name = "google-cloud-tasks"
 version = "2.24.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3242,6 +3262,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "google-adk" },
     { name = "google-cloud-firestore" },
+    { name = "google-cloud-pubsub" },
     { name = "google-cloud-tasks" },
     { name = "loguru" },
     { name = "mlflow" },
@@ -3273,6 +3294,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "google-adk", specifier = ">=2.7.0" },
     { name = "google-cloud-firestore", specifier = ">=2.28.1" },
+    { name = "google-cloud-pubsub", specifier = ">=2.39.2" },
     { name = "google-cloud-tasks", specifier = ">=2.24.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mlflow", specifier = ">=3.15.1" },

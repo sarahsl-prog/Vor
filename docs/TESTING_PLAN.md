@@ -22,6 +22,8 @@ should gate on.
 | `orchestrator.py` | `test_orchestrator.py` | **The asymmetric reconciliation** — model mocked, all four cases: correct SUPPRESS, model misses a real deviation (override), model over-cautious (no override), NO_HISTORY skips reconciliation |
 | `main.py` | `test_main.py` | `/healthz`, `/classify` firing background audit on SUPPRESS, the duplicate-audit guard, `/sweep` |
 | `datasets.py` | `test_datasets.py` | All 6 synthetic cases, each asserted against the real graduation/diversity/diffing code rather than hardcoded expectations |
+| `event_stream.py` | `test_event_stream.py` | Seed determinism, canonical-case injection interval and cycle order, traffic mix at the rate extremes, and that generated alerts pass the real `pattern_identity_key`/template code rather than a hand-checked field list. Also pins that the synthetic labels never leak into the published alert |
+| `scripts/generate_events.py` | `test_generate_events.py` | Publishing against a fake `Publisher` (no client, credentials or network): `--file` validation before any publish, per-event failures counted not fatal, unconfirmed futures not reported as published, dry-run JSON round-tripping back into `--file` |
 | `classifier_agent.py` / `auditor_agent.py` | `test_agents.py` | Construction smoke tests — name, output schema/key, no tools, non-empty prompt |
 | `scripts/seed_firestore.py` | `test_seed_firestore.py` | `--file` input validation (validated before any write), identity grouping, tier reporting, dry-run |
 | `scripts/backfill_identity_key.py` | `test_backfill_identity_key.py` | identity_key recovery from instances, re-key to the hashed doc ID, idempotency, unrecoverable-doc skip |

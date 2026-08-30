@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "google-adk>=2.7.0",
     "google-cloud-firestore>=2.28.1",
+    "google-cloud-pubsub>=2.39.2",
     "google-cloud-tasks>=2.24.0",
     "loguru>=0.7.3",
     "mlflow>=3.15.1",
@@ -64,3 +65,4 @@ exclude = [
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
 skips = ["B101"]
+
