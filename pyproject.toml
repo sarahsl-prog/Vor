@@ -31,6 +31,7 @@ dev = [
     "black>=26.5.1",
     "httpx>=0.28.1",
     "mypy>=2.3.1",
+    "pandas-stubs>=3.0.5.260730",
     "pre-commit>=4.6.2",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",

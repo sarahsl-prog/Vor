@@ -32,7 +32,7 @@ jobs:
         run: uv run --frozen black .
 
       - name: Type check (mypy)
-        run: uv run --frozen mypy vor_agents/ main.py scripts/
+        run: uv run --frozen mypy vor_agents/ main.py scripts/ dashboard/
 
       - name: Security scan (bandit)
         run: uv run --frozen bandit -r vor_agents/ main.py scripts/ -f txt -q

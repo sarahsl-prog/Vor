@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 
+from vor_agents.enrichment import days_since_last_review
 from vor_agents.firestore_config import firestore_database
 
 # ------------------------------------------------------------------
@@ -244,24 +245,40 @@ def _join_identity(value: Any) -> str:
 # ------------------------------------------------------------------
 
 
+_AUTO_REFRESH_ARMED = "_auto_refresh_armed"
+
+
 def inject_auto_refresh(seconds: int = 15) -> None:
     """Rerun the whole app every ``seconds`` so live Firestore data refreshes.
 
     A prior version injected ``<script>window.location.reload()</script>`` via
     ``st.markdown`` — scripts inserted through markup never execute, so it
     silently did nothing. A ``run_every`` fragment is the supported mechanism.
+
+    ``_tick`` is reached two different ways and must behave differently in each:
+    directly from this function on every script run (part of drawing the page —
+    must NOT rerun), and on its own ``run_every`` timer without any script run
+    (the refresh — must rerun the app so the cached loaders re-read Firestore).
+
+    The flag is therefore *disarmed here, on every script run*, and armed only
+    once ``_tick`` has completed a render pass. An earlier version armed it and
+    never disarmed it, so every subsequent script run — the timed refresh, but
+    also any widget interaction or navigation — re-entered ``_tick`` already
+    armed and called ``st.rerun`` while rendering, which reran the script, which
+    re-entered ``_tick``: an unbreakable rerun loop that hung the Home and
+    Traces pages on first interaction. Disarming is what breaks it, so keep the
+    assignment below *outside* the fragment: a fragment-scoped rerun does not
+    re-execute this function, which is exactly the distinction being drawn.
     """
 
     @st.fragment(run_every=seconds)
     def _tick() -> None:
-        # The fragment body runs once during the normal page render and then
-        # again every `seconds`. Only the timed re-executions should trigger a
-        # full-app rerun; the first pass is already part of the page render.
         st.session_state["_last_refresh"] = datetime.now(UTC).strftime("%H:%M:%S UTC")
-        if st.session_state.get("_auto_refresh_primed"):
+        if st.session_state.get(_AUTO_REFRESH_ARMED):
             st.rerun(scope="app")
-        st.session_state["_auto_refresh_primed"] = True
+        st.session_state[_AUTO_REFRESH_ARMED] = True
 
+    st.session_state[_AUTO_REFRESH_ARMED] = False
     _tick()
 
 
@@ -279,10 +296,6 @@ def _get_firestore_client() -> Any:
     except Exception as exc:  # noqa: BLE001 - degrade to demo data on any client/auth/network error
         st.warning(f"Firestore unavailable: {exc}")
         return None
-
-
-def firestore_available() -> bool:
-    return _get_firestore_client() is not None
 
 
 # ------------------------------------------------------------------
@@ -310,7 +323,20 @@ def load_patterns() -> pd.DataFrame:
                     "failure_count": _as_int(data.get("failure_count")),
                     "instance_count": _as_int(data.get("instance_count")),
                     "diversity_score": round(_as_float(data.get("diversity_score")), 2),
-                    "days_since_last_review": _as_int(data.get("days_since_last_review")),
+                    # Computed from last_reviewed_at, never read as a stored
+                    # field: no confidence_doc writes days_since_last_review,
+                    # so .get() returned None for every real pattern and
+                    # coerced to 0 -- "audited today" shown for a pattern
+                    # that has never been audited at all (true value 9999),
+                    # the most reassuring possible reading of the staleness
+                    # signal in exactly the case that should alarm. Demo data
+                    # supplies the field directly, which is why the table
+                    # looked right without Firestore. enrichment's helper is
+                    # the same one enrich() and the sweep use, so the
+                    # dashboard cannot disagree with them about staleness --
+                    # its docstring records this bug being found in enrich()
+                    # first (Code-review-Aug25 C-3).
+                    "days_since_last_review": days_since_last_review(data, doc_id=doc.id),
                     "last_reviewed_at": data.get("last_reviewed_at", ""),
                     "confirmed_instances": data.get("confirmed_instances", []),
                     "fields": data.get("fields", {}),
@@ -554,8 +580,21 @@ def _demo_needs_attention() -> pd.DataFrame:
 # ------------------------------------------------------------------
 
 
+def _selected(key: str) -> str | None:
+    """Read a selection out of session state as ``str | None``.
+
+    ``st.session_state.get()`` is untyped, so returning it directly gave
+    mypy an ``Any`` where ``str | None`` was declared -- the annotation
+    claimed a guarantee nothing checked. Coercing here makes it true, and
+    keeps a value written as a non-string (a numpy int from a dataframe
+    selection, say) from reaching the callers that compare it to a doc_id.
+    """
+    value = st.session_state.get(key)
+    return None if value is None else str(value)
+
+
 def get_selected_pattern_id() -> str | None:
-    return st.session_state.get("selected_pattern_id", None)
+    return _selected("selected_pattern_id")
 
 
 def set_selected_pattern_id(val: str) -> None:
@@ -563,7 +602,7 @@ def set_selected_pattern_id(val: str) -> None:
 
 
 def get_selected_trace_id() -> str | None:
-    return st.session_state.get("selected_trace_id", None)
+    return _selected("selected_trace_id")
 
 
 def set_selected_trace_id(val: str) -> None:

@@ -22,8 +22,8 @@ repos:
         types: [python]
 
       - id: mypy
-        name: mypy (vor_agents/, main.py)
-        entry: uv run --frozen mypy vor_agents/ main.py
+        name: mypy (vor_agents/, main.py, dashboard/)
+        entry: uv run --frozen mypy vor_agents/ main.py dashboard/
         language: system
         pass_filenames: false
         types: [python]

@@ -19,7 +19,6 @@ traces = load_pending_traces()
 # ------------------------------------------------------------------
 st.subheader("Pipeline Stages")
 
-cols = st.columns(5)
 stage_labels = [
     "🚨 Incoming Alert",
     "🔍 Classify",
@@ -35,17 +34,27 @@ stage_desc = [
     "Update confidence doc + clear under_review",
 ]
 
-for i, (col, label, desc) in enumerate(zip(cols, stage_labels, stage_desc)):
-    with col:
+# Stages and connectors get their own interleaved columns
+# (stage, arrow, stage, arrow, …) so each arrow renders *between* two
+# cards. A previous version laid out 5 columns and wrote stage i's arrow
+# into column i+1, which Streamlit appends before that column's own card
+# is written on the next iteration -- so every arrow rendered stacked
+# above the following card rather than beside it.
+stage_widths = [4, 1] * (len(stage_labels) - 1) + [4]
+cols = st.columns(stage_widths)
+
+for index, (label, desc) in enumerate(zip(stage_labels, stage_desc)):
+    icon, name = label.split(" ", 1)
+    with cols[index * 2]:
         st.markdown(
             f'<div class="panel" style="text-align:center;">'
-            f'<div style="font-size:2rem;margin-bottom:0.3rem;">{label.split()[0]}</div>'
-            f'<strong>{label.split(" ", 1)[1]}</strong><br/>'
+            f'<div style="font-size:2rem;margin-bottom:0.3rem;">{icon}</div>'
+            f"<strong>{name}</strong><br/>"
             f'<span style="font-size:0.8rem;color:#aaa;">{desc}</span></div>',
             unsafe_allow_html=True,
         )
-    if i < len(cols) - 1:
-        with cols[i + 1]:
+    if index < len(stage_labels) - 1:
+        with cols[index * 2 + 1]:
             st.markdown(
                 '<div style="text-align:center;margin-top:2.5rem;font-size:1.5rem;">➜</div>',
                 unsafe_allow_html=True,
@@ -70,7 +79,7 @@ with left:
                 "SUPPRESS": "badge-suppress",
                 "ESCALATE": "badge-escalate",
                 "UNCERTAIN": "badge-uncertain",
-            }.get(decision, "badge-provisional")
+            }.get(str(decision), "badge-provisional")
             st.markdown(
                 f'<div class="triage-card">'
                 f'<span class="{badge}">{h(decision)}</span> '
@@ -90,7 +99,7 @@ with right:
                 "NO_ACTION": "badge-suppress",
                 "DOWNGRADE": "badge-escalate",
                 "RECOMMEND_UPGRADE_FOR_HUMAN_REVIEW": "badge-uncertain",
-            }.get(action, "badge-provisional")
+            }.get(str(action), "badge-provisional")
             st.markdown(
                 f'<div class="triage-card">'
                 f'<span class="{badge}">{h(action)}</span> '
@@ -153,7 +162,7 @@ else:
                 prov[
                     ["identity_key", "instance_count", "diversity_score", "days_since_last_review"]
                 ],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -163,7 +172,7 @@ else:
         if not rev.empty:
             st.dataframe(
                 rev[["identity_key", "tier", "instance_count", "days_since_last_review"]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -175,7 +184,7 @@ else:
                 conf[
                     ["identity_key", "instance_count", "diversity_score", "days_since_last_review"]
                 ],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -188,6 +197,6 @@ else:
         if not attn.empty:
             st.dataframe(
                 attn[["identity_key", "tier", "failure_count", "instance_count"]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
