@@ -7,6 +7,7 @@ tracking server.
 """
 
 import json
+from datetime import UTC, datetime, timedelta
 
 from vor_agents.schemas import (
     AuditorAction,
@@ -16,7 +17,9 @@ from vor_agents.schemas import (
     UncertainReason,
 )
 from vor_agents.tracing import (
+    DEFAULT_PENDING_TRACE_RETENTION_DAYS,
     PENDING_TRACES_COLLECTION,
+    TTL_FIELD,
     log_audit_trace,
     log_classification_trace,
     mlflow_experiment_name,
@@ -415,3 +418,66 @@ class TestSummaryParams:
         assert fake.params["decision"] == "ESCALATE"
         assert fake.params["overrides_fired"] == "under_review"
         assert fake.tags["reasoning"] == "queued during an outage"
+
+
+class TestPendingTraceTTL:
+    """Regression: deploy.sh set a Firestore TTL policy on `queued_at`,
+    which is written as an ISO *string*. Firestore TTL only acts on
+    timestamp fields, so the policy deleted nothing and the documented
+    bound on pending_traces growth did not exist.
+
+    The fix is a separate `expires_at` datetime. These tests pin both
+    halves of why: that it is a real datetime (a string is inert to TTL)
+    and that it is in the FUTURE (Firestore's expiry is the field's own
+    value, so writing the queue time would sweep the queue immediately).
+    """
+
+    @staticmethod
+    def _queued_doc(fake_firestore, monkeypatch):
+        monkeypatch.setattr("vor_agents.tracing.mlflow", _FakeMlflowAlwaysFails())
+        log_classification_trace(
+            {}, {"pattern_identity_key": ("R",)}, _classifier_output(), [], fake_firestore
+        )
+        docs = list(fake_firestore.collection(PENDING_TRACES_COLLECTION).stream())
+        assert len(docs) == 1
+        return docs[0].to_dict()
+
+    def test_ttl_field_is_a_datetime_not_a_string(self, fake_firestore, monkeypatch):
+        # google-cloud-firestore maps a datetime to a Firestore timestamp;
+        # a string is stored as a string and TTL ignores it entirely.
+        doc = self._queued_doc(fake_firestore, monkeypatch)
+        assert isinstance(doc[TTL_FIELD], datetime)
+
+    def test_ttl_field_is_in_the_future(self, fake_firestore, monkeypatch):
+        # The whole point: Firestore deletes when the field's value passes.
+        # queued_at is already in the past at write time, so pointing the
+        # policy at it would expire every doc the moment it was written.
+        doc = self._queued_doc(fake_firestore, monkeypatch)
+        assert doc[TTL_FIELD] > datetime.now(UTC)
+
+    def test_retention_defaults_to_the_documented_window(self, fake_firestore, monkeypatch):
+        doc = self._queued_doc(fake_firestore, monkeypatch)
+        expected = datetime.now(UTC) + timedelta(days=DEFAULT_PENDING_TRACE_RETENTION_DAYS)
+        assert abs((doc[TTL_FIELD] - expected).total_seconds()) < 60
+
+    def test_retention_is_configurable(self, fake_firestore, monkeypatch):
+        monkeypatch.setenv("PENDING_TRACE_RETENTION_DAYS", "2")
+        doc = self._queued_doc(fake_firestore, monkeypatch)
+        expected = datetime.now(UTC) + timedelta(days=2)
+        assert abs((doc[TTL_FIELD] - expected).total_seconds()) < 60
+
+    def test_a_bad_retention_value_falls_back_rather_than_raising(
+        self, fake_firestore, monkeypatch
+    ):
+        # Same posture as every other env_int setting: a typo in a deploy
+        # flag must not break the fallback queue, which is itself the
+        # thing that runs when something else is already broken.
+        monkeypatch.setenv("PENDING_TRACE_RETENTION_DAYS", "thirty")
+        doc = self._queued_doc(fake_firestore, monkeypatch)
+        expected = datetime.now(UTC) + timedelta(days=DEFAULT_PENDING_TRACE_RETENTION_DAYS)
+        assert abs((doc[TTL_FIELD] - expected).total_seconds()) < 60
+
+    def test_queued_at_is_still_written_for_humans(self, fake_firestore, monkeypatch):
+        doc = self._queued_doc(fake_firestore, monkeypatch)
+        assert isinstance(doc["queued_at"], str)
+        assert doc["queued_at"].startswith(str(datetime.now(UTC).year))

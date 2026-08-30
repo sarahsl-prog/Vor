@@ -9,7 +9,7 @@ docs/superpowers/specs/2026-08-24-mlflow-tracing-design.md.
 
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -45,14 +45,55 @@ class TracingError(Exception):
     """
 
 
+TTL_FIELD = "expires_at"
+
+DEFAULT_PENDING_TRACE_RETENTION_DAYS = 30
+PENDING_TRACE_RETENTION_DAYS_ENV_VAR = "PENDING_TRACE_RETENTION_DAYS"
+# How long a queued trace survives before Firestore's TTL deletes it.
+# 30 days is an unvalidated starting point, same posture as every other
+# interval in this project: long enough that an outage plus a weekend
+# plus a slow fix does not silently destroy trace data, short enough that
+# a permanently-broken MLflow does not grow the collection forever.
+
+
 def _write_pending_trace(run_type: str, run_data: dict[str, Any], firestore_client: Client) -> None:
+    """
+    Queues one trace for later replay into MLflow.
+
+    Writes TWO time fields, which look redundant and are not:
+
+    `queued_at` is an ISO **string**, for humans reading the doc and for
+    anyone reconstructing the outage window afterwards.
+
+    `expires_at` is a real **datetime**, and is the only one Firestore's
+    TTL policy can act on -- a TTL policy pointed at a string field
+    silently does nothing, deleting no document ever. deploy.sh
+    previously pointed the policy at `queued_at`, so the bound this
+    project documented ("docs older than the TTL window are eventually
+    purged even if MLflow never recovers") did not exist at all.
+
+    `expires_at` is queued_at + retention rather than queued_at itself
+    because Firestore's expiry IS the field's value -- there is no
+    separate window to configure. Pointing the policy at the write time
+    would mark every doc expired the instant it was written, and the
+    fallback queue would be swept within about a day: exactly the
+    long-outage case it exists to survive.
+    """
     doc_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    retention = env_int(
+        PENDING_TRACE_RETENTION_DAYS_ENV_VAR, DEFAULT_PENDING_TRACE_RETENTION_DAYS, minimum=1
+    )
     try:
         firestore_client.collection(PENDING_TRACES_COLLECTION).document(doc_id).set(
             {
                 "run_type": run_type,
                 "run_data": run_data,
-                "queued_at": datetime.now(UTC).isoformat(),
+                "queued_at": now.isoformat(),
+                # A datetime, not .isoformat() -- google-cloud-firestore
+                # maps it to a Firestore timestamp, which is the only
+                # type a TTL policy recognises.
+                TTL_FIELD: now + timedelta(days=retention),
             }
         )
     except Exception as exc:
