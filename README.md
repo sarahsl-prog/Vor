@@ -61,7 +61,7 @@ The full reasoning behind these choices is archived in
 | `vor_agents/blast_radius.py` | Firestore-backed risk table + gated proposal path | No |
 | `vor_agents/audit_targets.py` | Deterministic auditor target prioritization | No |
 | `vor_agents/task_queue.py` | Cloud Tasks audit-enqueue path with server-side dedup | No |
-| `vor_agents/tracing.py` | MLflow tracing, with a Firestore fallback queue | No |
+| `vor_agents/tracing.py` | MLflow tracing (queryable run params + full artifact), with a Firestore fallback queue | No |
 | `vor_agents/datasets.py` | Synthetic dataset generation for the 6 canonical cases | No |
 | `vor_agents/event_stream.py` | Synthetic alert *stream*: background traffic with the 6 cases injected | No |
 | `vor_agents/model_config.py` | Gemini model selection (`GEMINI_MODEL`) | No |
@@ -112,7 +112,7 @@ cp .env.example .env    # then fill it in
 Run the test suite and the quality gates:
 
 ```bash
-uv run pytest                                    # 395 tests, no network or credentials needed
+uv run pytest                                    # 417 tests, no network or credentials needed
 uv run ruff check .
 uv run black --check .
 uv run mypy vor_agents/ main.py scripts/ dashboard/

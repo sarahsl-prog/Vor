@@ -7,7 +7,7 @@ from shared import (
     inject_theme,
     load_needs_attention,
     load_patterns,
-    load_pending_traces,
+    load_traces,
 )
 
 inject_theme()
@@ -23,7 +23,7 @@ st.markdown(
 # Load data
 # ------------------------------------------------------------------
 patterns = load_patterns()
-traces = load_pending_traces()
+traces = load_traces()
 needs_attention = load_needs_attention()
 
 # ------------------------------------------------------------------
@@ -65,7 +65,7 @@ left, right = st.columns([3, 2])
 with left:
     st.subheader("📈 Recent Agent Runs")
     if traces.empty:
-        st.info("No traces yet.")
+        st.info("No agent runs logged yet.")
     else:
         for _, row in traces.head(10).iterrows():
             badge_class = (

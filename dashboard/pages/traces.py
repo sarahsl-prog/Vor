@@ -1,21 +1,38 @@
 """Vör Dashboard — Traces / Audit Log page."""
 
 import streamlit as st
-from shared import h, inject_auto_refresh, inject_theme, load_pending_traces
+from shared import (
+    count_pending_traces,
+    h,
+    inject_auto_refresh,
+    inject_theme,
+    load_traces,
+)
 
 inject_theme()
 inject_auto_refresh(15)
 
 st.markdown(
     '<div class="purple-bar"><h1>📜 Agent Traces</h1><span>'
-    "Live feed of classification and audit traces</span></div>",
+    "Live feed of classification and audit runs, read from MLflow</span></div>",
     unsafe_allow_html=True,
 )
 
-traces = load_pending_traces()
+traces = load_traces()
+
+# A non-zero backlog means MLflow logging is failing (or recently was),
+# so this feed is behind by that many runs. Surfaced here rather than
+# left invisible: these pages used to *be* the backlog, and an analyst
+# reading a trace feed needs to know when it is incomplete.
+pending = count_pending_traces()
+if pending:
+    st.warning(
+        f"{pending} trace(s) queued in Firestore awaiting replay into MLflow — "
+        "this feed is missing them until POST /replay-traces drains the queue."
+    )
 
 if traces.empty:
-    st.info("No pending traces.")
+    st.info("No agent runs logged yet.")
     st.stop()
 
 # ------------------------------------------------------------------

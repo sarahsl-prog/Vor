@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import FakeFirestoreClient
+from vor_agents.schemas import AuditorAction, AuditorOutput, ClassifierOutput, Decision
+from vor_agents.tracing import log_audit_trace, log_classification_trace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dashboard"))
@@ -98,6 +100,167 @@ class TestStalenessIsComputed:
     def test_malformed_timestamp_is_treated_as_never_reviewed(self, monkeypatch):
         frame = self._load(monkeypatch, {"d1": {"last_reviewed_at": "not-a-date"}})
         assert frame.iloc[0]["days_since_last_review"] == 9999
+
+
+class TestLoadTraces:
+    """The trace pages read MLflow, which is where traces actually live.
+
+    These write with the *real* tracing.py and read with the *real*
+    dashboard loader, against a real MLflow sqlite store. Mocking the
+    query would test the loader against my own assumption about what
+    tracing.py writes -- and the whole bug being fixed here was the two
+    sides disagreeing about where traces are. Nothing is asserted that a
+    round trip doesn't actually produce.
+    """
+
+    @staticmethod
+    def _write_and_load(tmp_path, monkeypatch, writes):
+        monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{tmp_path}/mlflow.db")
+        monkeypatch.setenv("MLFLOW_EXPERIMENT_NAME", f"vor-test-{tmp_path.name}")
+        import shared
+
+        for write in writes:
+            write()
+        shared.load_traces.clear()
+        return shared.load_traces()
+
+    def _classification(self, decision, overrides=(), reasoning="ok"):
+        return lambda: log_classification_trace(
+            {"detection_rule_id": "R"},
+            {"pattern_identity_key": ("SharePoint_ToolPane_Rule", "w3wp.exe", "csc.exe", "adm")},
+            ClassifierOutput(decision=decision, reasoning=reasoning),
+            list(overrides),
+            None,
+        )
+
+    def _audit(self, action):
+        return lambda: log_audit_trace(
+            ("R", "p", "c", "e"),
+            {},
+            AuditorOutput(action=action, reasoning="checked", concerns_found=[]),
+            False,
+            None,
+        )
+
+    def test_round_trip_reads_back_what_the_service_wrote(self, tmp_path, monkeypatch):
+        frame = self._write_and_load(
+            tmp_path,
+            monkeypatch,
+            [
+                self._classification(Decision.SUPPRESS),
+                self._classification(Decision.ESCALATE, ["ground_truth_missed"]),
+                self._audit(AuditorAction.DOWNGRADE),
+            ],
+        )
+        assert len(frame) == 3
+        assert frame["run_type"].value_counts().to_dict() == {"classification": 2, "audit": 1}
+
+    def test_decisions_are_the_values_the_badges_key_on(self, tmp_path, monkeypatch):
+        # If these came back as "Decision.SUPPRESS" every badge lookup in
+        # the pages would miss and fall through to a default -- silently.
+        frame = self._write_and_load(
+            tmp_path, monkeypatch, [self._classification(Decision.SUPPRESS)]
+        )
+        assert frame.iloc[0]["decision"] == "SUPPRESS"
+
+    def test_audit_rows_carry_action_and_the_decision_placeholder(self, tmp_path, monkeypatch):
+        # The pages render `decision if decision != "—" else action`, so a
+        # missing param has to arrive as that placeholder, not NaN.
+        frame = self._write_and_load(tmp_path, monkeypatch, [self._audit(AuditorAction.NO_ACTION)])
+        row = frame.iloc[0]
+        assert row["action"] == "NO_ACTION"
+        assert row["decision"] == "—"
+
+    def test_identity_key_renders_with_arrows(self, tmp_path, monkeypatch):
+        frame = self._write_and_load(
+            tmp_path, monkeypatch, [self._classification(Decision.SUPPRESS)]
+        )
+        assert frame.iloc[0]["identity_key"] == (
+            "SharePoint_ToolPane_Rule → w3wp.exe → csc.exe → adm"
+        )
+
+    def test_overrides_distinguish_none_fired_from_fired(self, tmp_path, monkeypatch):
+        frame = self._write_and_load(
+            tmp_path,
+            monkeypatch,
+            [
+                self._classification(Decision.SUPPRESS),
+                self._classification(Decision.ESCALATE, ["under_review"]),
+            ],
+        )
+        assert set(frame["overrides_fired"]) == {"", "under_review"}
+
+    def test_reasoning_is_truncated_for_display(self, tmp_path, monkeypatch):
+        frame = self._write_and_load(
+            tmp_path, monkeypatch, [self._classification(Decision.SUPPRESS, reasoning="x" * 500)]
+        )
+        assert len(frame.iloc[0]["reasoning"]) == 200
+
+    def test_no_runs_yields_an_empty_frame_that_still_has_columns(self, tmp_path, monkeypatch):
+        # A healthy, quiet deployment has zero runs. pd.DataFrame([]) has
+        # no columns, so pages that filter on traces["run_type"] after an
+        # .empty guard would raise KeyError instead of saying "none yet".
+        frame = self._write_and_load(tmp_path, monkeypatch, [])
+        assert frame.empty
+        for column in ("run_type", "decision", "action", "overrides_fired"):
+            assert column in frame
+
+    def test_the_traces_page_renders_runs_from_mlflow(self, tmp_path, monkeypatch):
+        # The end of the chain: not just that the loader can read MLflow,
+        # but that the page an analyst opens shows what the service
+        # logged there. Previously this page rendered the pending_traces
+        # outage queue, so it was blank whenever the system was healthy.
+        monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{tmp_path}/mlflow.db")
+        monkeypatch.setenv("MLFLOW_EXPERIMENT_NAME", f"vor-page-{tmp_path.name}")
+        self._classification(Decision.ESCALATE, ["ground_truth_missed"])()
+
+        import shared
+
+        shared.load_traces.clear()
+        app = _app("traces").run()
+
+        assert not app.exception
+        rendered = " ".join(block.value for block in app.markdown)
+        assert "ESCALATE" in rendered
+        assert "ground_truth_missed" in rendered
+
+    def test_unconfigured_mlflow_falls_back_to_demo_data(self, monkeypatch):
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+        import shared
+
+        shared.load_traces.clear()
+        frame = shared.load_traces()
+        assert not frame.empty
+
+
+class TestCountPendingTraces:
+    """pending_traces is an outage backlog, not the trace store. It is
+    surfaced as a count so a non-zero value reads as "this feed is behind"
+    rather than being mistaken for the runs themselves."""
+
+    def test_counts_queued_docs(self, monkeypatch):
+        import shared
+
+        client = FakeFirestoreClient()
+        for doc_id in ("t1", "t2"):
+            client.collection("pending_traces").document(doc_id).set({"run_type": "classification"})
+        monkeypatch.setattr(shared, "_get_firestore_client", lambda: client)
+        shared.count_pending_traces.clear()
+        assert shared.count_pending_traces() == 2
+
+    def test_empty_queue_is_zero(self, monkeypatch):
+        import shared
+
+        monkeypatch.setattr(shared, "_get_firestore_client", lambda: FakeFirestoreClient())
+        shared.count_pending_traces.clear()
+        assert shared.count_pending_traces() == 0
+
+    def test_no_firestore_is_zero_not_a_crash(self, monkeypatch):
+        import shared
+
+        monkeypatch.setattr(shared, "_get_firestore_client", lambda: None)
+        shared.count_pending_traces.clear()
+        assert shared.count_pending_traces() == 0
 
 
 class TestAutoRefreshDoesNotLoop:
