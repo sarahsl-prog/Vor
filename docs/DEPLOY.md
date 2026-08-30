@@ -376,6 +376,20 @@ other unvalidated interval/threshold in this project. Reuses the
 existing `vor-scheduler` service account, same as `/sweep`. `/replay-traces`
 must never be deployed with `--allow-unauthenticated`.
 
+Runs are logged with the scalar fields (`decision`, `action`,
+`overrides_fired`, `uncertain_reason`, `audit_failed`, `identity_key`) as
+MLflow **params** and the reasoning as a **tag**, alongside the full
+`run_data.json` artifact. The params are what `search_runs()` returns, so
+a reader can filter and aggregate over one query; the artifact stays the
+complete record for anything else. The dashboard's Traces, Home and
+Pipeline pages depend on this -- give the dashboard the same
+`MLFLOW_TRACKING_URI` and `MLFLOW_EXPERIMENT_NAME` as the service, or it
+has nothing to read.
+
+Runs logged before this change carry only `run_type` and `identity_key`,
+so they appear in the dashboard with `—` for decision and action. That is
+historical data, not a fault; nothing backfills them.
+
 `pending_traces` growth during an extended MLflow outage is now bounded
 two ways: `replay_pending_traces()` reads at most `$TRACE_REPLAY_BATCH_SIZE`
 docs per scheduled run (default 1000, see `vor_agents/tracing.py`), and

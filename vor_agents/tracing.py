@@ -7,8 +7,10 @@ being dropped, and replayed later by replay_pending_traces() -- see
 docs/superpowers/specs/2026-08-24-mlflow-tracing-design.md.
 """
 
+import os
 import uuid
 from datetime import UTC, datetime
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import mlflow
@@ -57,6 +59,93 @@ def _write_pending_trace(run_type: str, run_data: dict[str, Any], firestore_clie
         raise TracingError(f"Failed to queue pending trace: {exc}") from exc
 
 
+DEFAULT_EXPERIMENT_NAME = "Default"
+EXPERIMENT_NAME_ENV_VAR = "MLFLOW_EXPERIMENT_NAME"
+
+# Scalar run_data fields promoted onto the MLflow run as params. Params
+# are returned by search_runs(); everything else lives only inside the
+# run_data.json artifact, which costs one download per run to read. That
+# difference decides what a reader can do: aggregating decisions across
+# every run (what the dashboard's pipeline view does) is one query over
+# params, or N artifact downloads over the artifact. Only small, bounded,
+# filterable values belong here -- the artifact stays the full record.
+SUMMARY_PARAM_FIELDS = ("decision", "action", "uncertain_reason", "audit_failed")
+
+# reasoning is free text and can be long, so it goes in a tag (8000 chars)
+# rather than a param (6000), and is truncated rather than dropped -- a
+# reader wanting the untruncated text reads the artifact.
+REASONING_TAG = "reasoning"
+IDENTITY_KEY_SEPARATOR = " → "
+_MAX_TAG_LENGTH = 8000
+_MAX_PARAM_LENGTH = 6000
+
+
+def mlflow_experiment_name() -> str:
+    """
+    The experiment both the writer and any reader must agree on.
+
+    MLflow honours $MLFLOW_EXPERIMENT_NAME implicitly, so _log_run() used
+    to rely on that and never named an experiment itself. That works, but
+    it leaves the reader (dashboard/shared.py) guessing at the same
+    default from the other side of the system with nothing tying the two
+    together. Resolving it here, and having the writer set it explicitly,
+    makes the agreement checkable instead of coincidental.
+    """
+    return os.environ.get(EXPERIMENT_NAME_ENV_VAR) or DEFAULT_EXPERIMENT_NAME
+
+
+def _param_value(value: Any, limit: int = _MAX_PARAM_LENGTH, separator: str = ", ") -> str:
+    """
+    Renders one run_data value as an MLflow param/tag string.
+
+    Enums are unwrapped to `.value` deliberately: Decision and
+    AuditorAction subclass str, but since Python 3.11 `str(Decision
+    .SUPPRESS)` is "Decision.SUPPRESS", not "SUPPRESS". Writing that
+    would make every reader's decision lookup miss -- and it would only
+    show up as decisions quietly falling through to a default, never as
+    an error. json.dumps (which the artifact goes through) unwraps them
+    by value, so the param and the artifact would also have silently
+    disagreed about the same field.
+
+    Lists are joined rather than repr'd for the same reason: `str(["a",
+    "b"])` writes a Python repr into a data field that a reader then has
+    to eval back. `separator` only picks how a joined list reads -- the
+    canonical machine-readable form of every field stays the artifact.
+    """
+    if isinstance(value, Enum):
+        text = str(value.value)
+    elif isinstance(value, (list, tuple)):
+        text = separator.join(_param_value(item, limit) for item in value)
+    else:
+        text = str(value)
+    return text[:limit]
+
+
+def _summary_params(run_type: str, run_data: dict[str, Any]) -> dict[str, str]:
+    """Params for one run: the two that were always written, plus
+    whichever SUMMARY_PARAM_FIELDS this run_type actually carries
+    (classification has decision, audit has action). Absent fields are
+    omitted rather than written empty, so a reader can tell "this run
+    type has no such field" from "the field was empty"."""
+    params = {
+        "run_type": run_type,
+        # Joined with the same arrow the dashboard renders identity keys
+        # with, so MLflow's own UI and every dashboard page show one
+        # pattern the same way and no reader has to re-separate it.
+        "identity_key": _param_value(
+            run_data.get("identity_key"), separator=IDENTITY_KEY_SEPARATOR
+        ),
+    }
+    for name in SUMMARY_PARAM_FIELDS:
+        if name in run_data:
+            params[name] = _param_value(run_data[name])
+    if "overrides_fired" in run_data:
+        # Always written, empty string included: "no override fired" is a
+        # meaningful, queryable answer, not missing data.
+        params["overrides_fired"] = _param_value(run_data["overrides_fired"])
+    return params
+
+
 def _log_run(run_type: str, run_data: dict[str, Any], firestore_client: Client) -> None:
     """
     Shared best-effort logging path for both public functions below.
@@ -67,10 +156,11 @@ def _log_run(run_type: str, run_data: dict[str, Any], firestore_client: Client) 
     at least recoverable from log storage by hand in the worst case.
     """
     try:
+        mlflow.set_experiment(mlflow_experiment_name())
         with mlflow.start_run(run_name=f"{run_type}_{run_data.get('identity_key')}"):
-            mlflow.log_params(
-                {"run_type": run_type, "identity_key": str(run_data.get("identity_key"))}
-            )
+            mlflow.log_params(_summary_params(run_type, run_data))
+            if "reasoning" in run_data:
+                mlflow.set_tag(REASONING_TAG, _param_value(run_data["reasoning"], _MAX_TAG_LENGTH))
             mlflow.log_dict(run_data, "run_data.json")
         return
     except Exception as exc:  # noqa: BLE001 — deliberate: any MLflow
@@ -153,10 +243,19 @@ def replay_pending_traces(firestore_client: Client, max_docs: int | None = None)
         run_type = data.get("run_type", "unknown")
         run_data = data.get("run_data", {})
         try:
+            mlflow.set_experiment(mlflow_experiment_name())
             with mlflow.start_run(run_name=f"{run_type}_{run_data.get('identity_key')}_replayed"):
-                mlflow.log_params(
-                    {"run_type": run_type, "identity_key": str(run_data.get("identity_key"))}
-                )
+                # Same params and tag as the live path: a trace that
+                # reached MLflow late, after an outage, must be as
+                # queryable as one that got there first time. Writing
+                # fewer here would make an outage window show up in any
+                # reader as runs with blank decisions rather than as
+                # runs that arrived late.
+                mlflow.log_params(_summary_params(run_type, run_data))
+                if "reasoning" in run_data:
+                    mlflow.set_tag(
+                        REASONING_TAG, _param_value(run_data["reasoning"], _MAX_TAG_LENGTH)
+                    )
                 mlflow.log_dict(run_data, "run_data.json")
             firestore_client.collection(PENDING_TRACES_COLLECTION).document(doc.id).delete()
             replayed += 1

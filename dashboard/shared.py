@@ -5,20 +5,24 @@ Vör Dashboard — shared helpers: theme, Firestore data, demo fallback, state.
 from __future__ import annotations
 
 import html
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import streamlit as st
+from loguru import logger
 
 # Ensure vor_agents is importable when running from dashboard/
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import mlflow
 import pandas as pd
 
 from vor_agents.enrichment import days_since_last_review
 from vor_agents.firestore_config import firestore_database
+from vor_agents.tracing import mlflow_experiment_name
 
 # ------------------------------------------------------------------
 # Theme
@@ -348,35 +352,129 @@ def load_patterns() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# How many runs one traces query pulls back, newest first. The pages show
+# far fewer than this; the headroom is for the Pipeline page, which
+# aggregates decision and override counts over whatever it is given, so a
+# too-small cap would quietly narrow those distributions rather than fail.
+TRACE_QUERY_LIMIT = 500
+
+TRACE_COLUMNS = [
+    "run_id",
+    "run_type",
+    "decision",
+    "action",
+    "identity_key",
+    "reasoning",
+    "overrides_fired",
+    "queued_at",
+]
+
+
+def _empty_traces() -> pd.DataFrame:
+    """An empty frame that still has the columns callers index.
+
+    `pd.DataFrame([])` has no columns at all, so a page that guards with
+    `if traces.empty` but then filters on `traces["run_type"]` raises a
+    KeyError instead of showing "no traces" -- an easy thing to hit here,
+    because a healthy, quiet deployment legitimately has zero runs.
+    """
+    return pd.DataFrame({name: pd.Series(dtype="object") for name in TRACE_COLUMNS})
+
+
+def _mlflow_configured() -> bool:
+    return bool(os.environ.get("MLFLOW_TRACKING_URI"))
+
+
 @st.cache_data(ttl=15)
-def load_pending_traces() -> pd.DataFrame:
+def load_traces(limit: int = TRACE_QUERY_LIMIT) -> pd.DataFrame:
+    """
+    Recent classification and audit runs, read from MLflow.
+
+    MLflow is where traces actually live. These pages previously read the
+    `pending_traces` Firestore collection, which is *not* the trace store:
+    tracing.py writes there only when MLflow logging raises, and
+    replay_pending_traces() deletes each doc once it has been replayed. So
+    the trace views were empty whenever the system was healthy, and when
+    they weren't, they showed a sample biased to whatever failed to log,
+    which then disappeared on the next replay run. pending_traces is now
+    surfaced as what it is -- an outage backlog -- by
+    count_pending_traces() below.
+
+    Reads only run params and tags (one query), never the run_data.json
+    artifact (one download per run). That is why tracing.py promotes the
+    scalar fields onto the run; the artifact remains the full record for
+    anyone who needs the alert, the enrichment or the untruncated
+    reasoning.
+    """
+    if not _mlflow_configured():
+        # No tracking server configured: MLFLOW_TRACKING_URI unset means
+        # the service isn't logging to a durable store either, so there is
+        # nothing to read rather than something that failed to be read.
+        st.warning("MLFLOW_TRACKING_URI is not set — showing demo traces, not live data.")
+        return _demo_traces()
+
+    try:
+        # output_format is explicit rather than left to default: it is what
+        # decides the return type (a DataFrame vs a list[Run]), so naming
+        # it is also what makes the cast below honest rather than a guess.
+        result = mlflow.search_runs(
+            experiment_names=[mlflow_experiment_name()],
+            max_results=limit,
+            order_by=["attributes.start_time DESC"],
+            output_format="pandas",
+        )
+        runs = cast("pd.DataFrame", result)
+    except Exception as exc:  # noqa: BLE001 - dashboard must not crash on a bad query
+        st.warning(f"MLflow query failed, using demo data: {exc}")
+        return _demo_traces()
+
+    if runs.empty:
+        return _empty_traces()
+
+    def _column(name: str, default: str = "") -> pd.Series:
+        # A param absent on every run in the result means MLflow omits the
+        # column entirely; present on only some runs, it is NaN for the
+        # rest. Both mean "this run type doesn't carry that field", and
+        # both must read as the placeholder rather than blow up or render
+        # "nan" to an analyst.
+        if name not in runs:
+            return pd.Series([default] * len(runs), index=runs.index)
+        return runs[name].fillna(default)
+
+    return pd.DataFrame(
+        {
+            "run_id": _column("run_id"),
+            "run_type": _column("params.run_type", "unknown"),
+            "decision": _column("params.decision", "—"),
+            "action": _column("params.action", "—"),
+            "identity_key": _column("params.identity_key"),
+            "reasoning": _column("tags.reasoning").str.slice(0, 200),
+            "overrides_fired": _column("params.overrides_fired"),
+            "queued_at": _column("start_time").astype(str),
+        }
+    ).reset_index(drop=True)
+
+
+@st.cache_data(ttl=15)
+def count_pending_traces() -> int:
+    """
+    How many traces are sitting in the Firestore fallback queue waiting to
+    be replayed into MLflow.
+
+    A count, not a feed: a non-zero value is an operational signal that
+    MLflow logging is failing (or was), which the pages surface as a
+    health indicator. Reading it does not tell you what the agents
+    decided -- load_traces() does -- and 0 is both the normal and the
+    healthy answer.
+    """
     client = _get_firestore_client()
     if client is None:
-        return _demo_pending_traces()
-
-    rows: list[dict[str, Any]] = []
+        return 0
     try:
-        for doc in client.collection("pending_traces").stream():
-            data = doc.to_dict() or {}
-            run_data = data.get("run_data", {})
-            rows.append(
-                {
-                    "doc_id": doc.id,
-                    "run_type": data.get("run_type", "unknown"),
-                    "decision": run_data.get("decision", "—"),
-                    "action": run_data.get("action", "—"),
-                    "identity_key": _join_identity(run_data.get("identity_key")),
-                    "reasoning": str(run_data.get("reasoning", ""))[:200],
-                    "overrides_fired": ", ".join(
-                        str(o) for o in run_data.get("overrides_fired", [])
-                    ),
-                    "queued_at": data.get("queued_at", ""),
-                }
-            )
-    except Exception as exc:  # noqa: BLE001 - dashboard must not crash on a bad doc/query
-        st.warning(f"Firestore query failed, using demo data: {exc}")
-        return _demo_pending_traces()
-    return pd.DataFrame(rows)
+        return sum(1 for _ in client.collection("pending_traces").stream())
+    except Exception as exc:  # noqa: BLE001 - a health indicator must not take the page down
+        logger.warning("Could not count pending_traces: {}", repr(exc))
+        return 0
 
 
 @st.cache_data(ttl=15)
@@ -512,7 +610,7 @@ def _demo_patterns() -> pd.DataFrame:
     )
 
 
-def _demo_pending_traces() -> pd.DataFrame:
+def _demo_traces() -> pd.DataFrame:
     now = datetime.now(UTC).isoformat()
     return pd.DataFrame(
         [

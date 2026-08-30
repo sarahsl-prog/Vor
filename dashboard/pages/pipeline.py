@@ -1,7 +1,7 @@
 """Vör Dashboard — Pipeline / Agent Flow page."""
 
 import streamlit as st
-from shared import h, inject_theme, load_patterns, load_pending_traces
+from shared import h, inject_theme, load_patterns, load_traces
 
 inject_theme()
 
@@ -12,7 +12,7 @@ st.markdown(
 )
 
 patterns = load_patterns()
-traces = load_pending_traces()
+traces = load_traces()
 
 # ------------------------------------------------------------------
 # Visual pipeline stages
@@ -70,7 +70,7 @@ left, right = st.columns(2)
 with left:
     st.subheader("📊 Classification Decisions (Last Traces)")
     if traces.empty:
-        st.info("No trace data.")
+        st.info("No agent runs logged yet.")
     else:
         clf = traces[traces["run_type"] == "classification"]
         counts = clf["decision"].value_counts().to_dict()
@@ -90,7 +90,7 @@ with left:
 with right:
     st.subheader("📊 Audit Actions (Last Traces)")
     if traces.empty:
-        st.info("No trace data.")
+        st.info("No agent runs logged yet.")
     else:
         aud = traces[traces["run_type"] == "audit"]
         counts = aud["action"].value_counts().to_dict()
@@ -114,7 +114,7 @@ st.divider()
 # ------------------------------------------------------------------
 st.subheader("⚡ Override Breakdown")
 if traces.empty:
-    st.info("No trace data.")
+    st.info("No agent runs logged yet.")
 else:
     clf = traces[traces["run_type"] == "classification"]
     overrides = clf[clf["overrides_fired"] != ""]["overrides_fired"].value_counts().to_dict()
