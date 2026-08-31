@@ -1,0 +1,36 @@
+# Image for the Streamlit operator dashboard (dashboard/app.py).
+#
+# The repo's root Dockerfile builds the FastAPI request-path service. This
+# one is identical up to the entrypoint: same base, same locked deps, it
+# just starts Streamlit instead of uvicorn. Built via
+# cloudbuild.dashboard.yaml so Cloud Build picks this file rather than the
+# default-named Dockerfile. See docs/DEPLOY.md section 6.
+
+FROM python:3.13-slim
+
+# uv binary, minor-pinned to match local / CI.
+COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /bin/
+
+WORKDIR /app
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
+# Resolve dependencies first so this layer is cached unless the lock changes.
+# streamlit is a runtime dependency in pyproject.toml, so --no-dev keeps it.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
+
+COPY . .
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Cloud Run sets $PORT. --enableCORS/--enableXsrfProtection off because the
+# service sits behind IAP, which terminates and re-originates the request;
+# Streamlit's same-origin checks otherwise reject the proxied WebSocket.
+CMD exec streamlit run dashboard/app.py \
+  --server.port ${PORT:-8080} --server.address 0.0.0.0 \
+  --server.headless true \
+  --server.enableCORS false \
+  --server.enableXsrfProtection false
