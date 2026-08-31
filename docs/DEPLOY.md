@@ -298,8 +298,9 @@ To verify the path end to end before a real ingest source exists,
 
 ### Running the generator from a GCE VM
 
-A convenient place to run it is the same VM that hosts MLflow. What that
-box needs:
+A convenient place to run it is the same VM that hosts MLflow — see
+"Network setup for the MLflow VM" in section 5 for a VPC layout that keeps
+that box reachable only from Vör and your own SSH. What it needs:
 
 ```bash
 # 1. The repo and its dependencies (needs Python 3.13)
@@ -320,6 +321,10 @@ was created without `--scopes cloud-platform`, publishing fails with a
 403 even though the IAM binding is correct. Either recreate the VM with
 that scope or authenticate as a user with `gcloud auth
 application-default login`.
+
+On a VM with no external IP, the `git clone` and `uv sync` above need
+Cloud NAT and the Google API calls need Private Google Access — both are
+in the section 5 network setup.
 
 Then send for real:
 
@@ -417,51 +422,154 @@ Without `MLFLOW_EXPERIMENT_NAME` every run lands in MLflow's `Default`
 experiment, so a tracking server shared across environments mixes their
 traces together irreversibly.
 
-### Reaching an MLflow server on a GCE VM
+### Network setup for the MLflow VM
 
-Cloud Run cannot reach a VM's **private** IP by default — it has no route
-into your VPC. Two workable shapes:
+The goal: the tracking server is reachable **only** from Vör, plus your own
+SSH. That is achievable with no external IP on the VM at all, which is both
+simpler and stronger than firewalling a public address — Cloud Run's egress
+has no fixed source range to restrict without VPC egress anyway.
 
-**Direct VPC egress (preferred).** Keep the VM private and give the
-service a route in:
+```
+Cloud Run (Vör)  ──Direct VPC egress──▶ subnet: vor-run (10.10.1.0/26)
+                                             │
+                          firewall: tcp:5000 │ source = 10.10.1.0/26
+                                             ▼
+                                    VM (no external IP), tag: mlflow
+                                    subnet: vor-data (10.10.0.0/24)
+                                             ▲
+                          firewall: tcp:22   │ source = 35.235.240.0/20 (IAP)
+                                             │
+You ──gcloud compute ssh --tunnel-through-iap┘
+
+VM ──▶ Google APIs (Pub/Sub, Firestore)  via Private Google Access
+VM ──▶ PyPI / GitHub                     via Cloud NAT
+```
+
+Two subnets in one VPC. The Cloud Run subnet is dedicated to the service, so
+its CIDR *is* the identity being filtered on — which matters, because MLflow
+ships with **no authentication of its own**. The firewall is doing the
+authenticating, and the tracking server holds the same alert, decision and
+reasoning data Firestore does.
+
+**1. VPC and subnets.** Private Google Access on the data subnet is what
+lets the VM reach Pub/Sub and Firestore without an external IP:
 
 ```bash
-gcloud run services update vor \
-  --region us-central1 \
-  --network default \
-  --subnet default \
+gcloud compute networks create vor-vpc --subnet-mode custom
+
+gcloud compute networks subnets create vor-data \
+  --network vor-vpc --region us-central1 \
+  --range 10.10.0.0/24 \
+  --enable-private-ip-google-access
+
+gcloud compute networks subnets create vor-run \
+  --network vor-vpc --region us-central1 \
+  --range 10.10.1.0/26
+```
+
+`/26` is the floor Google recommends for Direct VPC egress; at
+`--max-instances 3` (step 1) it is ample.
+
+**2. Firewall.** GCP already denies all other ingress at priority 65535, so
+only two allows are needed. The explicit logged deny is for visibility, not
+enforcement:
+
+```bash
+gcloud compute firewall-rules create allow-mlflow-from-vor \
+  --network vor-vpc --direction INGRESS --action ALLOW \
+  --rules tcp:5000 --source-ranges 10.10.1.0/26 --target-tags mlflow
+
+gcloud compute firewall-rules create allow-ssh-from-iap \
+  --network vor-vpc --direction INGRESS --action ALLOW \
+  --rules tcp:22 --source-ranges 35.235.240.0/20 --target-tags mlflow
+
+gcloud compute firewall-rules create deny-all-ingress-logged \
+  --network vor-vpc --direction INGRESS --action DENY \
+  --rules all --source-ranges 0.0.0.0/0 --priority 65000 \
+  --enable-logging
+```
+
+`35.235.240.0/20` is IAP's TCP-forwarding range: fixed, Google-owned, and
+the only source that can reach port 22.
+
+**3. The VM, with no external IP:**
+
+```bash
+gcloud compute instances create vor-mlflow \
+  --zone us-central1-a \
+  --subnet vor-data --no-address \
+  --tags mlflow \
+  --scopes cloud-platform \
+  --service-account vor-mlflow@YOUR_PROJECT_ID.iam.gserviceaccount.com
+```
+
+`--scopes cloud-platform` is the one that bites otherwise: the default GCE
+scopes omit Pub/Sub publish, and `scripts/generate_events.py` then 403s from
+this box even with the IAM binding correct.
+
+**4. Cloud NAT**, because `uv sync` and `git clone` need the public internet
+and Private Google Access only covers Google APIs. This is egress-only — it
+gives the VM outbound reach without making it reachable:
+
+```bash
+gcloud compute routers create vor-router --network vor-vpc --region us-central1
+
+gcloud compute routers nats create vor-nat \
+  --router vor-router --region us-central1 \
+  --nat-all-subnet-ip-ranges --auto-allocate-nat-external-ip
+```
+
+**5. Point Cloud Run at the VPC:**
+
+```bash
+gcloud run services update vor --region us-central1 \
+  --network vor-vpc --subnet vor-run \
   --vpc-egress private-ranges-only
 ```
 
-Then allow the service's subnet range to reach the MLflow port:
+`private-ranges-only` matters: only RFC1918 traffic goes through the VPC, so
+Vertex AI, Firestore and Cloud Tasks keep their normal Google path.
+`all-traffic` would force everything through the VPC and require NAT for the
+Cloud Run service too. A Serverless VPC Access connector is the older
+equivalent if Direct VPC egress is unavailable in your region.
+
+**6. Your own access**, for SSH and both UIs over one tunnel:
 
 ```bash
-gcloud compute firewall-rules create allow-vor-to-mlflow \
-  --network default \
-  --direction INGRESS \
-  --action ALLOW \
-  --rules tcp:5000 \
-  --source-ranges YOUR_SUBNET_CIDR \
-  --target-tags mlflow
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member "user:YOUR_EMAIL" \
+  --role "roles/iap.tunnelResourceAccessor"
+
+gcloud compute ssh vor-mlflow --zone us-central1-a --tunnel-through-iap \
+  -- -L 8501:localhost:8501 -L 5000:localhost:5000
 ```
 
-`MLFLOW_TRACKING_URI` is then the VM's internal IP, e.g.
-`http://10.128.0.5:5000`. A Serverless VPC Access connector is the older
-equivalent if Direct VPC egress isn't available in your region.
+That puts the Streamlit dashboard on `localhost:8501` and the MLflow UI on
+`localhost:5000` with neither port open to anything.
 
-**Public IP.** Simpler, and worse: Cloud Run's egress has no fixed source
-range to firewall against without VPC egress plus Cloud NAT, so you end
-up allowing `0.0.0.0/0` to a server that ships with **no authentication**
-— anyone who finds it can read every alert, decision and reasoning trace
-Vör has produced. If you must, terminate TLS and put an authenticating
-proxy (IAP, or a reverse proxy with basic auth) in front, and treat the
-tracking server as production-sensitive: it holds the same data Firestore
-does.
+`MLFLOW_TRACKING_URI` is then the VM's internal address for Cloud Run
+(`http://10.10.0.2:5000`), and `http://localhost:5000` for the dashboard if
+you run it on the VM. Reserve the internal IP as static
+(`gcloud compute addresses create --subnet vor-data`) or use the stable
+internal DNS name `vor-mlflow.us-central1-a.c.YOUR_PROJECT_ID.internal`, or
+the URI breaks when the VM is recreated.
 
-Either way the credential for any auth you add goes in Secret Manager /
-`.env`, never hardcoded, per CLAUDE.md's secrets rule. This repo's code
-only reads `MLFLOW_TRACKING_URI`; the `mlflow` client reads whatever auth
-env vars your setup needs.
+Bind MLflow to `--host 0.0.0.0` (see the next section). That is safe *only*
+because there is no external IP and the firewall is closed — it is the
+firewall making it safe, so don't relax either without adding real auth. Any
+credential for auth you do add goes in Secret Manager / `.env`, never
+hardcoded, per CLAUDE.md's secrets rule.
+
+**Two caveats on this design, neither verified against a live project:**
+
+- Firewall filtering by **source service account** would be a stronger
+  control than a CIDR, but it is a GCE-source feature and is not expected to
+  apply to Cloud Run Direct VPC egress traffic. Hence the dedicated subnet,
+  whose CIDR stands in for the service's identity. If SA-based filtering
+  does work for it, prefer that.
+- **Migrating an existing VM** that has an external IP: remove it with
+  `gcloud compute instances delete-access-config`, but only *after* Cloud NAT
+  is up, or the VM loses outbound access mid-flight.
 
 ### Check the server's backend store
 
@@ -548,13 +656,18 @@ export MLFLOW_EXPERIMENT_NAME=vor-prod
 uv run streamlit run dashboard/app.py --server.port 8501
 ```
 
-Reach it over an SSH tunnel rather than opening the port — the dashboard
-has no authentication of its own and shows every alert, decision and
-reasoning trace:
+Reach it over a tunnel rather than opening the port — the dashboard has no
+authentication of its own and shows every alert, decision and reasoning
+trace. With the section 5 network setup the VM has no external IP, so the
+tunnel goes through IAP and carries the MLflow UI along with it:
 
 ```bash
-gcloud compute ssh YOUR_VM --zone YOUR_ZONE -- -L 8501:localhost:8501
+gcloud compute ssh vor-mlflow --zone us-central1-a --tunnel-through-iap \
+  -- -L 8501:localhost:8501 -L 5000:localhost:5000
 ```
+
+Do not add a firewall rule for 8501. The dashboard is reachable only
+through this tunnel by design.
 
 The Traces page shows a banner when `pending_traces` is non-empty, naming
 how many runs the feed is behind by. In a healthy deployment that count
