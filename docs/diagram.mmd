@@ -1,0 +1,106 @@
+---
+
+references:
+  - "File: /tests/test_orchestrator.py"
+  - "File: /vor_agents/orchestrator.py"
+generationTime: 2026-08-15T23:34:11.483Z
+---
+flowchart TD
+    subgraph Tests["tests/test_orchestrator.py"]
+        T1["TestReconciliation"]
+        T1A["test_model_correctly_suppresses_no_override()"]
+        T1B["test_model_misses_real_deviation_gets_overridden()"]
+        T2["TestSelfConsistency"]
+        T2A["SUPPRESS + self-reported deviation"]
+        T3["TestSessionUniqueness"]
+        T3A["session_id differs per call"]
+        T4["TestAuditPatternFailureHandling"]
+        T4A["exception / invalid output clears under_review"]
+        T5["TestRunScheduledSweep"]
+        T5A["enqueues targets and deduplicates"]
+    end
+
+    subgraph Orchestrator["vor_agents/orchestrator.py"]
+        A["classify_alert(alert, firestore_client)"]
+        A1["enrich(alert, firestore_client)"]
+        A2{"status == 'TEMPLATE' ?"}
+        A3["diff_alert_against_template()"]
+        A4["build_classifier_agent()"]
+        A5["_run_agent()"]
+        A6["ClassifierOutput.model_validate()"]
+        A7{"precomputed_deviations not empty?"}
+        A8{"missed_by_model and decision == 'SUPPRESS' ?"}
+        A9["override to ESCALATE + merge deviations"]
+        A10{"structural_deviations_found and decision == 'SUPPRESS' ?"}
+        A11["self-consistency override to ESCALATE"]
+        A12["return (classifier_output, identity_key)"]
+
+        B1["audit_pattern(identity_key, pattern_data, firestore_client)"]
+        B2["mark_under_review()"]
+        B3["read confirmed_instances from Firestore"]
+        B4["build_auditor_agent()"]
+        B5["_run_agent()"]
+        B6["AuditorOutput.model_validate()"]
+        B7{"exception raised?"}
+        B8["decision = NO_ACTION with error reasoning"]
+        B9["clear_under_review()"]
+
+        C1["run_scheduled_sweep(firestore_client, enqueue_audit_fn)"]
+        C2["_fetch_all_suppressed_patterns()"]
+        C3["for doc in docs"]
+        C4["compute days_since_last_review"]
+        C5["compute evidence_diversity_score"]
+        C6["compute blast_radius_estimate"]
+        C7["select_audit_targets()"]
+        C8["for pattern in targets"]
+        C9["enqueue_audit_fn(identity_key, pattern)"]
+        C10["return enqueued identity_keys"]
+    end
+
+    T1A --> A
+    T1B --> A
+    T2A --> A
+    T3A --> A
+    T4A --> B1
+    T5A --> C1
+
+    A --> A1
+    A1 --> A2
+    A2 -->|Yes| A3
+    A2 -->|No| A4
+    A3 --> A4
+    A4 --> A5
+    A5 --> A6
+    A6 --> A7
+    A7 -->|Yes| A8
+    A7 -->|No| A10
+    A8 -->|Yes| A9
+    A8 -->|No| A10
+    A9 --> A10
+    A10 -->|Yes| A11
+    A10 -->|No| A12
+    A11 --> A12
+
+    B1 --> B2
+    B2 --> B3
+    B3 --> B4
+    B4 --> B5
+    B5 --> B7
+    B7 -->|No exception| B6
+    B6 --> B9
+    B7 -->|Exception| B8
+    B8 --> B9
+
+    C1 --> C2
+    C2 --> C3
+    C3 --> C4
+    C4 --> C5
+    C5 --> C6
+    C6 --> C7
+    C7 --> C8
+    C8 --> C9
+    C9 --> C10
+
+    C3 -.-> C2
+    C8 -.-> C7
+    A12 -.-> B1
