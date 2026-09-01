@@ -638,7 +638,9 @@ running `deploy.sh` if the defaults don't match your traffic.
 
 `dashboard/` is a Streamlit app and is deliberately **not** deployed by
 `deploy.sh` — it is an operator tool, not part of the request path, and
-it reads the same two stores the service writes.
+it reads the same two stores the service writes. The default access model
+is an IAP tunnel (below); for a shareable HTTPS URL instead, see
+"Deploying the dashboard externally" at the end of this section.
 
 It needs:
 
@@ -673,3 +675,71 @@ The Traces page shows a banner when `pending_traces` is non-empty, naming
 how many runs the feed is behind by. In a healthy deployment that count
 is 0; a growing one means MLflow logging is failing and `/replay-traces`
 has not caught up.
+
+### Deploying the dashboard externally (Cloud Run + IAP)
+
+The tunnel above is the default and needs no extra infrastructure. If you
+need a shareable HTTPS URL instead — for reviewers who will not run
+`gcloud` — put the dashboard on its own Cloud Run service **behind
+Identity-Aware Proxy**. Never expose it with `--allow-unauthenticated`:
+the app has no login of its own and renders every alert, decision and
+reasoning trace, so the only thing standing between that data and the
+public internet is the infrastructure gate. IAP is that gate.
+
+```bash
+export GCP_PROJECT=your-project-id
+export DASHBOARD_VIEWERS="user:you@example.com,group:ops@example.com"
+export MLFLOW_TRACKING_URI=http://10.10.0.5:5000    # the MLflow VM's internal IP
+export MLFLOW_EXPERIMENT_NAME=vor-prod              # must match the `vor` service
+export FIRESTORE_DATABASE=vor-db                    # if you use a named database
+./scripts/deploy-dashboard.sh
+
+# Tear it down (leaves the main `vor` stack, VPC and all data untouched)
+./scripts/deploy-dashboard-cleanup.sh
+```
+
+`deploy-dashboard.sh` is separate from `deploy.sh` on purpose — the
+dashboard is an operator tool, not part of the request path, and its
+viewer allowlist is a human decision that should not live in the main
+deploy. It builds `Dockerfile.dashboard` via `cloudbuild.dashboard.yaml`
+(the root `Dockerfile` is the FastAPI service; Cloud Build only picks up
+a file named exactly `Dockerfile`, hence the second image and build
+config), creates a read-only `vor-dashboard` service account with
+`roles/datastore.viewer` and nothing else, deploys the service, enables
+IAP, and grants `roles/iap.httpsResourceAccessor` to every member in
+`DASHBOARD_VIEWERS`. It refuses to run with `DASHBOARD_VIEWERS` empty.
+
+Three things the script does that a plain `gcloud run deploy` would not:
+
+- **Deploys onto the `vor-run` subnet** (`--network vor-vpc --subnet
+  vor-run --vpc-egress private-ranges-only`). The dashboard reads MLflow
+  at the VM's internal address, and the `allow-mlflow-from-vor` firewall
+  rule (section 5) only admits `10.10.1.0/26`. No firewall change is
+  needed. Without this the Traces/Home/Pipeline pages fall back to demo
+  data. Override the subnet with `VPC_SUBNET` if your firewall rule names
+  a different source range.
+- **`--max-instances 1 --session-affinity`.** Streamlit keeps per-session
+  state in the serving process. The dashboard is read-only, so one
+  instance is not a capacity concern.
+- **`MLFLOW_TRACKING_URI` / `MLFLOW_EXPERIMENT_NAME` must match the `vor`
+  service exactly.** A different experiment name gives an empty Traces
+  page rather than an error; the script warns when either looks wrong. If
+  the `vor` service itself has no MLflow URI set (traces still queuing to
+  `pending_traces`), the dashboard has nothing live to show regardless.
+
+The first `--iap` enable on a project may require the OAuth consent
+screen (brand) to be configured once — the script prints what to do if it
+hits that. After that the service URL is public HTTPS, but every request
+must clear Google sign-in **and** appear in the
+`roles/iap.httpsResourceAccessor` allowlist. Add or remove a viewer later
+with:
+
+```bash
+gcloud run services add-iam-policy-binding vor-dashboard \
+  --region us-central1 --member "user:NAME@example.com" \
+  --role "roles/iap.httpsResourceAccessor"
+
+gcloud run services remove-iam-policy-binding vor-dashboard \
+  --region us-central1 --member "user:NAME@example.com" \
+  --role "roles/iap.httpsResourceAccessor"
+```

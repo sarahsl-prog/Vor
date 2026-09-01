@@ -1,0 +1,15 @@
+# Builds the dashboard image from Dockerfile.dashboard.
+#
+# `gcloud run deploy --source` / `gcloud builds submit --tag` only pick up
+# a file literally named "Dockerfile". The dashboard needs a second image
+# from the same repo, so scripts/deploy-dashboard.sh runs this config
+# explicitly:
+#
+#   gcloud builds submit --config cloudbuild.dashboard.yaml \
+#     --substitutions _IMAGE=REGION-docker.pkg.dev/PROJECT/REPO/vor-dashboard
+#
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-t", "${_IMAGE}", "-f", "Dockerfile.dashboard", "."]
+images:
+  - "${_IMAGE}"
