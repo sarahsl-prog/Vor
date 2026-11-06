@@ -12,7 +12,7 @@ dependencies = [
     "google-cloud-pubsub>=2.39.2",
     "google-cloud-tasks>=2.24.0",
     "loguru>=0.7.3",
-    "mlflow>=3.15.1",
+    "mlflow>=3.17.2",
     # mlflow pins pandas<3; the dashboard only needs basic DataFrame ops, so
     # stay on the 2.x line rather than forcing an mlflow downgrade.
     "pandas>=2.2,<3",
